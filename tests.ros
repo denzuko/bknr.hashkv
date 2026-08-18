@@ -1,0 +1,17 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -Q -- $0 "$@"
+|#
+(progn
+  (ros:ensure-asdf))
+
+(let ((root (merge-pathnames "" *load-pathname*)))
+  (push root asdf:*central-registry*))
+
+(asdf:load-system :bknr.hashkv/tests :verbose nil)
+
+(defun main (&rest argv)
+  "Runs the bknr.hashkv test suite and exits 0 on success, 1 on failure."
+  (declare (ignorable argv))
+  (uiop:quit (if (bknr.hashkv/tests:run-tests) 0 1)))

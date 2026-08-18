@@ -1,0 +1,22 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -Q -- $0 "$@"
+|#
+(progn
+  (ros:ensure-asdf))
+
+(let ((root (merge-pathnames "" *load-pathname*)))
+  (push root asdf:*central-registry*))
+
+(asdf:load-system :bknr.hashkv :verbose nil)
+
+(defun main (&rest argv)
+  "Opens the bknr.hashkv store and starts its worker thread. ARGV is
+unused for now; accepted so this script composes with Roswell's
+standard invocation convention."
+  (declare (ignorable argv))
+  (bknr.hashkv:open-store)
+  (bknr.hashkv:start-worker)
+  (format t "~&bknr.hashkv store ready at ~A~%" bknr.hashkv::*store-directory*)
+  (format t "Use (bknr.hashkv:submit :put value), (bknr.hashkv:submit :get key), or (bknr.hashkv:submit :delete key).~%"))

@@ -1,0 +1,17 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -Q -- $0 "$@"
+|#
+(progn
+  (ros:ensure-asdf))
+
+(let ((root (merge-pathnames "" *load-pathname*)))
+  (push root asdf:*central-registry*))
+
+(asdf:load-system :bknr.hashkv/docs :verbose nil)
+
+(defun main (&rest argv)
+  "Writes bknr.hashkv's exported docstrings to standard output."
+  (declare (ignorable argv))
+  (bknr.hashkv/docs:generate))
