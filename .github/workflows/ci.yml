@@ -11,6 +11,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set dps-meta git config
+        run: |
+          git config meta.application bknr.hashkv
+          git config meta.role "Content-addressable key/value store plus a persisted job queue over bknr.datastore"
+          git config meta.type lisp-actor
+          git config meta.version 1.0.0
+          git config meta.branch develop
+          git config meta.licence bsd-3-clause
       - uses: denzuko/dps-meta@v1
         with:
           type: lisp-actor

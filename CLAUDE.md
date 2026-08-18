@@ -1,12 +1,12 @@
 # CLAUDE.md
 
 Hand-authored. `.github/workflows/ci.yml` invokes
-`denzuko/dps-meta@v1` (`type: lisp-actor`) on GitHub's own runners,
-not locally in the environment this repo was scaffolded in, where
-neither SBCL nor network access to that runner exists. This file
-should be treated as a placeholder until the Action actually runs
-against a push to `develop` and regenerates it for real; its output
-has not been observed from this environment.
+`denzuko/dps-meta@v1` (`type: lisp-actor`) on GitHub's own runners.
+The first run failed (`git config meta.application is not set`)
+because git config set locally in the scaffolding environment never
+reaches a fresh CI checkout; the workflow now sets those keys as a CI
+step directly. This file should still be treated as a placeholder
+until a successful Action run regenerates it for real.
 
 ## Project Identity
 
