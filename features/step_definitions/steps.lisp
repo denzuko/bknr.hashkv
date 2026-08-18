@@ -2,7 +2,7 @@
 ;;;;
 ;;;; Step definitions for bknr.hashkv.feature, implemented against
 ;;;; sunny-side (denzuko/sunny-side), a standalone pure-Lisp Gherkin
-;;;; engine extracted from this project — no Ruby, no wire protocol.
+;;;; engine extracted from this project. No Ruby, no wire protocol.
 ;;;; These assertions use FIVEAM:IS, the same as t/test.lisp and
 ;;;; t/e2e.lisp, so all three suites read consistently.
 

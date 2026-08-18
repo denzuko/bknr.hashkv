@@ -3,7 +3,7 @@
 ;;;; bknr.hashkv's manual, defined with 40ants-doc.
 ;;;;
 ;;;; NOTE: 40ants-doc:document's exact keyword arguments have changed
-;;;; across that library's history — confirm the current signature
+;;;; across that library's history. Confirm the current signature
 ;;;; locally before relying on this in CI.
 
 (defpackage :bknr.hashkv/docs

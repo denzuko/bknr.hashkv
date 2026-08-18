@@ -7,7 +7,7 @@ both over `bknr.datastore`, implemented in Common Lisp.
 
 This extends `bknr.datastore`; it is not part of the bknr project
 itself. `bknr.indices`, `bknr.impex`, and `bknr.datastore` are sibling
-systems shipped from the bknr project's own repository — this one
+systems shipped from the bknr project's own repository. This one
 isn't. It's `denzuko/bknr.hashkv`, a separate, independently published
 project. Quicklisp's system namespace is flat, not hierarchical, so
 nothing prevents the dotted name; the repo path is what actually
@@ -24,19 +24,19 @@ wrapper scripts.
 
 | Component          | Responsibility                                                  |
 |---------------------|------------------------------------------------------------------|
-| `bknr.datastore`    | Persistence — on-disk snapshot and transaction log               |
-| `bknr.ttl`          | TTL — `timestamped-entry` mixin (`created-at`/`expires-at`), its own repo (`denzuko/bknr.ttl`) so other projects can depend on just it |
-| `sunny-side`        | Gherkin/BDD — pure-Lisp `.feature`-to-FiveAM engine, its own repo (`denzuko/sunny-side`), not bknr-specific at all |
-| `ironclad` + `babel`| Hashing — SHA-256 digest of a value's printed representation     |
-| `chanl`             | Concurrency — serializes ad hoc KV requests through one worker thread |
-| `lparallel`         | Parallelism — hashes batches of values across a worker kernel     |
+| `bknr.datastore`    | Persistence: on-disk snapshot and transaction log               |
+| `bknr.ttl`          | TTL: `timestamped-entry` mixin (`created-at`/`expires-at`), its own repo (`denzuko/bknr.ttl`) so other projects can depend on just it |
+| `sunny-side`        | Gherkin/BDD: pure-Lisp `.feature`-to-FiveAM engine, its own repo (`denzuko/sunny-side`), not bknr-specific at all |
+| `ironclad` + `babel`| Hashing: SHA-256 digest of a value's printed representation     |
+| `chanl`             | Concurrency: serializes ad hoc KV requests through one worker thread |
+| `lparallel`         | Parallelism: hashes batches of values across a worker kernel     |
 
 **Two separate structures share the same store on purpose:**
 
-- `kv-entry` — content-addressed by default (`put-value` hashes the
+- `kv-entry`: content-addressed by default (`put-value` hashes the
   payload; identical values dedupe to one key), or explicitly keyed
   (`put-keyed`) for named slots like sessions or counters.
-- `queue-entry` — identity is always generated, never content-derived,
+- `queue-entry`: identity is always generated, never content-derived,
   because two independently enqueued jobs with identical payloads must
   stay two entries; content-addressing would wrongly collapse them.
   FIFO via a sequence number; claiming (`dequeue-claim`) is atomic;
@@ -46,7 +46,7 @@ wrapper scripts.
 Both inherit TTL from `bknr.ttl:timestamped-entry` rather than
 declaring it twice.
 
-**Two different "queue" concepts appear in this codebase — they are
+**Two different "queue" concepts appear in this codebase, and they are
 not the same thing.** `chanl`'s `*request-channel*`/`submit` is a
 request-serialization queue local to one Lisp image, used only for
 ad hoc KV `:put`/`:get`/`:delete` calls. The persisted `queue-entry`
@@ -55,22 +55,22 @@ by multiple worker processes and survives a restart. Don't wire one
 into the other without thinking through what changes.
 
 **Known scaling limit:** `dequeue-claim` and `reclaim-stale-claims`
-both enumerate every `queue-entry` and scan/sort in Lisp — O(n) per
+both enumerate every `queue-entry` and scan/sort in Lisp: O(n) per
 claim. `bknr.indices` ships hash-table-backed indices (`unique-index`,
 `hash-index`, `hash-list-index`) but no ordered/range index, so there
 is no built-in equivalent of Postgres's partial B-tree on
 `WHERE claimed_by IS NULL`. A `hash-list-index` on `claimed_by` (with
-`:index-nil t` — the default silently excludes NIL-valued slots,
+`:index-nil t`; the default silently excludes NIL-valued slots,
 which is exactly the unclaimed case) would narrow the scan to just
-the unclaimed set; true O(log n) "first unclaimed" ordering would
+the unclaimed set. True O(log n) "first unclaimed" ordering would
 need a custom sorted index class written against `bknr.indices`'
-documented extension protocol. Neither is implemented yet — worth a
-scoped follow-up before real job volume.
+documented extension protocol. Neither is implemented yet and both
+are worth a scoped follow-up before real job volume.
 
 This deliberately does not attempt to be a Redis clone: no pub/sub, no
 wire protocol, no eviction policy, no replication. Those solve "be a
-Redis"; the goal here is a KV store and a job queue that other
-projects can embed as a library — no second service to operate, one
+Redis." The goal here is a KV store and a job queue that other
+projects can embed as a library: no second service to operate, one
 persistence substrate (`bknr.datastore`) shared with the rest of the
 org's projects rather than three storage models to reason about.
 
@@ -131,7 +131,7 @@ content-addressed blobs:
                                             ;   then NIL (lazy expiry)
 ```
 
-The persisted job queue — note this is separate from the
+The persisted job queue. Note this is separate from the
 `start-worker`/`submit` KV request queue above:
 
 ```lisp
@@ -140,8 +140,8 @@ The persisted job queue — note this is separate from the
 (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "worker-7")
   (when id
     (process payload)
-    (bknr.hashkv:ack-job id)))            ; success — remove it
-    ;; or (bknr.hashkv:release-job id)    ; failure — make it claimable again
+    (bknr.hashkv:ack-job id)))            ; success: remove it
+    ;; or (bknr.hashkv:release-job id)    ; failure: make it claimable again
 
 ;; Run periodically (e.g. from a cron-style task) to recover jobs
 ;; whose worker died mid-claim without acking or releasing:
@@ -153,7 +153,7 @@ The persisted job queue — note this is separate from the
 Two FiveAM suites are kept separate:
 
 ```sh
-./tests.ros   # unit — bknr.hashkv/tests, exercises PUT-VALUE/GET-VALUE/etc.
+./tests.ros   # unit: bknr.hashkv/tests, exercises PUT-VALUE/GET-VALUE/etc.
               # directly, one behavior per test
 ```
 
@@ -168,14 +168,14 @@ looks correct in-process but doesn't actually survive a restart. Both
 suites run against scratch datastores under `/tmp/`, deleted and
 recreated before each test.
 
-### BDD (Gherkin, via sunny-side — no Ruby)
+### BDD (Gherkin, via sunny-side, no Ruby)
 
 `features/bknr.hashkv.feature` is Gherkin, and it's the thing that
 actually runs, not documentation alongside a separately maintained
-test suite: `sunny-side` (`denzuko/sunny-side`) is a standalone
-pure-Lisp Gherkin engine — a small hand-rolled parser
+test suite. `sunny-side` (`denzuko/sunny-side`) is a standalone
+pure-Lisp Gherkin engine: a small hand-rolled parser
 (Feature/Background/Scenario/Given-When-Then-And-But) that turns each
-Scenario into an ordinary FiveAM test at compile time — and
+Scenario into an ordinary FiveAM test at compile time. And
 `features/step_definitions/steps.lisp` implements the step bodies
 against `bknr.hashkv` using `fiveam:is`, the same assertion style as
 `t/test.lisp` and `t/e2e.lisp`.
@@ -186,27 +186,28 @@ against `bknr.hashkv` using `fiveam:is`, the same assertion style as
 
 This replaced an earlier `clucumber`-based version of this layer.
 `clucumber` (`antifuchs/clucumber`) implements only the Lisp side of
-the Cucumber *wire protocol* — something still has to parse `.feature`
+the Cucumber *wire protocol*. Something still has to parse `.feature`
 files and drive it over a socket, and that's the Ruby `cucumber` gem
 itself, not an optional add-on. That meant a second language toolchain
 (`Gemfile`, `bundle install`, the Ruby `cucumber` CLI) just to run
-tests for a Lisp library — the same "no second thing to operate"
+tests for a Lisp library, the same "no second thing to operate"
 objection that ruled out Redis and Postgres for the store itself
 applies here too. The trade-off: `sunny-side`'s parser only covers the
 Gherkin subset actually in use (no `Scenario Outline`/`Examples`
-tables, no data tables, no doc strings, no tags) — real, but scoped
-and extendable rather than externally imposed.
+tables, no data tables, no doc strings, no tags). That is a real
+limit, but a scoped and extendable one rather than an externally
+imposed one.
 
 `sunny-side` was originally written inline in this project
 (`src/gherkin.lisp`) and pulled out into its own repo once it was
-clear the engine wasn't `bknr.hashkv`-specific — nothing in it touches
+clear the engine wasn't `bknr.hashkv`-specific. Nothing in it touches
 `bknr.datastore` or anything else here. `bknr.hashkv` is its reference
 consumer, not a special case.
 
-**Lower risk than the rest of this project's unverified pieces**:
+**Lower risk than the rest of this project's unverified pieces:**
 `sunny-side` and `steps.lisp` are code this project owns, not guesses
-at a third-party library's API surface. Still genuinely untested — no
-SBCL/Quicklisp available in this environment to run it — so treat it
+at a third-party library's API surface. Still genuinely untested, with
+no SBCL/Quicklisp available in this environment to run it, so treat it
 as needing a real run before trusting it in CI, same as everything
 else here.
 
@@ -218,8 +219,8 @@ else here.
 
 Renders `@BKNR.HASHKV-MANUAL` (defined in `src/docs.lisp`) via
 `40ants-doc`. The exact keyword arguments accepted by
-`40ants-doc:document` have changed across that library's history —
-confirm the current signature locally before wiring this into CI.
+`40ants-doc:document` have changed across that library's history.
+Confirm the current signature locally before wiring this into CI.
 
 ## License
 

@@ -3,7 +3,7 @@
 ;;;; End-to-end guards. Unlike t/test.lisp, these exercise the system
 ;;;; the way a real caller would: through the worker/submit interface,
 ;;;; and across a close-store/open-store cycle, to catch the class of
-;;;; bug unit tests miss — state that only breaks once the process
+;;;; bug unit tests miss: state that only breaks once the process
 ;;;; boundary or the datastore's on-disk representation is involved.
 
 (defpackage :bknr.hashkv/e2e
@@ -41,7 +41,7 @@ tears the worker and store back down."
 (test entries-survive-a-store-restart
   "Writes a value, closes the store (simulating a process restart),
 reopens it at the same directory, and confirms the value is still
-retrievable — the guard that catches a transaction log that isn't
+retrievable. The guard catches a transaction log that isn't
 actually being flushed or replayed correctly."
   (fresh-e2e-store)
   (let ((key (bknr.hashkv:put-value "durable value")))
@@ -52,7 +52,7 @@ actually being flushed or replayed correctly."
 
 (test batch-put-then-individually-readable
   "Batch-writes several values in parallel, then confirms each is
-independently readable through the ordinary single-value path —
+independently readable through the ordinary single-value path,
 catching any hazard from the lparallel hashing step racing the
 sequential datastore writes."
   (fresh-e2e-store)
@@ -65,7 +65,7 @@ sequential datastore writes."
 
 (test queued-jobs-survive-a-store-restart
   "Enqueues a job, closes the store, reopens it, and confirms the job
-is still there and still claimable in the right order — the queue
+is still there and still claimable in the right order. The queue
 analogue of ENTRIES-SURVIVE-A-STORE-RESTART, and also a check that
 the sequence counter bootstraps correctly rather than resetting to
 zero and colliding with what's already persisted."

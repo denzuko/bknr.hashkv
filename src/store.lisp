@@ -2,12 +2,12 @@
 ;;;;
 ;;;; Two distinct persisted structures over the same bknr.datastore:
 ;;;;
-;;;;   KV-ENTRY    — content-addressed by default (PUT-VALUE hashes
+;;;;   KV-ENTRY    : content-addressed by default (PUT-VALUE hashes
 ;;;;                 the payload; identical values dedupe to one key),
 ;;;;                 or explicitly keyed (PUT-KEYED) for named slots
 ;;;;                 like sessions or counters. Both support TTL.
 ;;;;
-;;;;   QUEUE-ENTRY — identity is always generated, never content-
+;;;;   QUEUE-ENTRY : identity is always generated, never content-
 ;;;;                 derived, because two independently enqueued jobs
 ;;;;                 with identical payloads must stay two entries.
 ;;;;                 FIFO via a sequence number; claiming is atomic;
@@ -17,7 +17,7 @@
 ;;;; CREATED-AT/EXPIRES-AT rather than declaring it twice.
 ;;;;
 ;;;; chanl still serializes ad hoc :put/:get/:delete requests through
-;;;; SUBMIT, as before — that is a request-serialization queue local
+;;;; SUBMIT, as before. That is a request-serialization queue local
 ;;;; to one Lisp image, and is a different thing from the persisted
 ;;;; QUEUE-ENTRY job queue below, which is meant to be claimed by
 ;;;; multiple worker processes. Don't conflate the two.
@@ -74,7 +74,7 @@ sequence number lower than what is already persisted.")
         :index-type bknr.indices:unique-index
         :index-reader entry-with-key)
    (value :initarg :value :accessor entry-value))
-  (:documentation "A single stored value, indexed by KEY — either a
+  (:documentation "A single stored value, indexed by KEY, either a
 content hash (PUT-VALUE) or a caller-supplied name (PUT-KEYED)."))
 
 (bknr.datastore:defpersistent-class queue-entry (bknr.ttl:timestamped-entry)
@@ -86,7 +86,7 @@ content hash (PUT-VALUE) or a caller-supplied name (PUT-KEYED)."))
    (claimed-by :initarg :claimed-by :accessor entry-claimed-by :initform nil)
    (claimed-at :initarg :claimed-at :accessor entry-claimed-at :initform nil))
   (:documentation "A single queued job. Identity (ID) is generated,
-never a content hash — two jobs with identical PAYLOADs are two
+never a content hash. Two jobs with identical PAYLOADs are two
 distinct entries, which content-addressing would wrongly collapse."))
 
 (bknr.ttl:register-ttl-class 'kv-entry)
@@ -150,7 +150,7 @@ EXPIRES-IN-SECONDS, if given, sets a TTL relative to now."
 (defun put-keyed (key value &key expires-in-seconds)
   "Stores VALUE under the caller-supplied KEY, overwriting any
 existing entry at that key. Unlike PUT-VALUE, KEY is not derived from
-VALUE — use this for named slots (session tokens, counters, config)
+VALUE. Use this for named slots (session tokens, counters, config)
 rather than content-addressed blobs. Returns KEY."
   (bknr.datastore:with-transaction ()
     (let ((existing (entry-with-key key))
@@ -194,7 +194,7 @@ removed, or NIL if no entry existed under KEY."
 
 (defun batch-put (values)
   "Hashes VALUES in parallel across the lparallel kernel, then writes
-each one under its computed hash on the calling thread — datastore
+each one under its computed hash on the calling thread. Datastore
 transactions remain sequential regardless. Returns the list of
 resulting keys, in the same order as VALUES."
   (ensure-kernel)
@@ -212,7 +212,7 @@ resulting keys, in the same order as VALUES."
 (defun generate-job-id ()
   "Generates a probably-unique job id. Collision odds are low enough
 for a single-instance queue; a distributed deployment would want a
-stronger id scheme (e.g. a UUID library) — noted as a known limit,
+stronger id scheme (e.g. a UUID library). Noted as a known limit,
 not solved here."
   (format nil "job-~(~36R~)-~(~36R~)" (get-universal-time) (random most-positive-fixnum)))
 
@@ -259,7 +259,7 @@ a matching entry was found and removed, NIL otherwise."
 
 (defun release-job (id)
   "Clears the claim on job ID without removing it, making it eligible
-for DEQUEUE-CLAIM again — the retry path for a worker that failed to
+for DEQUEUE-CLAIM again. The retry path for a worker that failed to
 finish it. Returns T if a matching entry was found, NIL otherwise."
   (let ((entry (entry-with-id id)))
     (unless entry
@@ -334,7 +334,7 @@ A NIL request on the channel tells the worker to stop."
 (defun submit (op arg)
   "Queues OP (:PUT, :GET, or :DELETE) with ARG on the worker thread and
 blocks until the result is available. START-WORKER must be called
-first. This is the KV request queue, not the QUEUE-ENTRY job queue —
+first. This is the KV request queue, not the QUEUE-ENTRY job queue;
 see the file header."
   (unless *request-channel*
     (error "bknr.hashkv worker is not running; call START-WORKER first."))

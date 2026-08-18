@@ -1,7 +1,7 @@
 ;;;; bknr.hashkv.asd
 ;;;;
 ;;;; Extends bknr.datastore and depends on bknr.ttl (denzuko/bknr.ttl,
-;;;; a separate repo — see that project's README for the naming
+;;;; a separate repo. See that project's README for the naming
 ;;;; rationale, which applies here too).
 
 (asdf:defsystem "bknr.hashkv"
@@ -27,14 +27,14 @@
   :components ((:file "docs")))
 
 (asdf:defsystem "bknr.hashkv/tests"
-  :description "FiveAM unit test suite for bknr.hashkv — exercises the store API directly, one behavior per test, no persistence-across-restart or worker-lifecycle concerns."
+  :description "FiveAM unit test suite for bknr.hashkv: exercises the store API directly, one behavior per test, no persistence-across-restart or worker-lifecycle concerns."
   :license "BSD-3-Clause"
   :depends-on ("bknr.hashkv" "fiveam" "uiop")
   :pathname "t/"
   :components ((:file "test")))
 
 (asdf:defsystem "bknr.hashkv/e2e"
-  :description "FiveAM end-to-end suite for bknr.hashkv — exercises the worker lifecycle and persistence across a store close/reopen, as a real caller would."
+  :description "FiveAM end-to-end suite for bknr.hashkv: exercises the worker lifecycle and persistence across a store close/reopen, as a real caller would."
   :license "BSD-3-Clause"
   :depends-on ("bknr.hashkv" "fiveam" "uiop")
   :pathname "t/"
