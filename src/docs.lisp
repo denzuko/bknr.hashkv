@@ -15,8 +15,9 @@
 (in-package :bknr.hashkv/docs)
 
 (defsection @bknr.hashkv-manual (:title "bknr.hashkv")
-  "Content-addressable KV store plus a persisted job queue, both over
-bknr.datastore, both with TTL via bknr.ttl:timestamped-entry."
+  "Content-addressable KV store plus a persisted, TTL-aware generic
+queue, both over bknr.datastore, both with TTL via
+bknr.ttl:timestamped-entry."
   (bknr.hashkv:open-store function)
   (bknr.hashkv:close-store function)
   (bknr.hashkv:put-value function)
@@ -26,8 +27,8 @@ bknr.datastore, both with TTL via bknr.ttl:timestamped-entry."
   (bknr.hashkv:batch-put function)
   (bknr.hashkv:enqueue function)
   (bknr.hashkv:dequeue-claim function)
-  (bknr.hashkv:ack-job function)
-  (bknr.hashkv:release-job function)
+  (bknr.hashkv:ack-claim function)
+  (bknr.hashkv:release-claim function)
   (bknr.hashkv:reclaim-stale-claims function)
   (bknr.hashkv:sweep-expired function)
   (bknr.hashkv:start-worker function)

@@ -60,7 +60,7 @@ Two different "queue" concepts appear in this codebase, and they are
 not the same thing. `chanl`'s `*request-channel*` and `submit`
 implement a request-serialization queue local to a single Lisp image,
 used only for ad hoc KV `:put`/`:get`/`:delete` calls. The persisted
-`queue-entry` structure (`enqueue`, `dequeue-claim`, `ack-job`) is
+`queue-entry` structure (`enqueue`, `dequeue-claim`, `ack-claim`) is
 built to be claimed by multiple worker processes and to survive a
 restart. Wiring one into the other without working through what that
 change means is a mistake worth avoiding.
@@ -223,14 +223,14 @@ worker above:
 ```lisp
 (bknr.hashkv:enqueue '(:resize-thumbnail "media/abc.jpg"))
 
-(multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "worker-7")
+(multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-7")
   (when id
     (process payload)
-    (bknr.hashkv:ack-job id)))            ; success: remove it
-    ;; or (bknr.hashkv:release-job id)    ; failure: make it claimable again
+    (bknr.hashkv:ack-claim id)))            ; success: remove it
+    ;; or (bknr.hashkv:release-claim id)    ; failure: make it claimable again
 
-;; Run periodically (e.g. from a cron-style task) to recover jobs
-;; whose worker died mid-claim without acking or releasing:
+;; Run periodically (e.g. from a cron-style task) to recover entries
+;; whose claimant died mid-claim without acking or releasing:
 (bknr.hashkv:reclaim-stale-claims :older-than-seconds 300)
 ```
 

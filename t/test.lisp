@@ -108,7 +108,7 @@ permanently, since STOP-WORKER only ever signals whichever task
 
 ;;; --- Queue ----------------------------------------------------------------
 
-(test identical-payloads-get-distinct-jobs
+(test identical-payloads-get-distinct-entries
   (fresh-store)
   (let ((id-a (bknr.hashkv:enqueue "same payload"))
         (id-b (bknr.hashkv:enqueue "same payload")))
@@ -119,34 +119,34 @@ permanently, since STOP-WORKER only ever signals whichever task
   (fresh-store)
   (bknr.hashkv:enqueue "first")
   (bknr.hashkv:enqueue "second")
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "worker-1")
+  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-1")
     (declare (ignore id))
     (is (string= "first" payload)))
   (bknr.hashkv:close-store))
 
-(test claimed-job-is-not-claimable-again
+(test claimed-entry-is-not-claimable-again
   (fresh-store)
-  (bknr.hashkv:enqueue "only job")
-  (bknr.hashkv:dequeue-claim "worker-1")
-  (is (null (bknr.hashkv:dequeue-claim "worker-2")))
+  (bknr.hashkv:enqueue "only entry")
+  (bknr.hashkv:dequeue-claim "claimant-1")
+  (is (null (bknr.hashkv:dequeue-claim "claimant-2")))
   (bknr.hashkv:close-store))
 
-(test ack-removes-job-from-queue
+(test ack-removes-entry-from-queue
   (fresh-store)
   (bknr.hashkv:enqueue "to finish")
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "worker-1")
+  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-1")
     (declare (ignore payload))
-    (is (eq t (bknr.hashkv:ack-job id))))
-  (is (null (bknr.hashkv:dequeue-claim "worker-2")))
+    (is (eq t (bknr.hashkv:ack-claim id))))
+  (is (null (bknr.hashkv:dequeue-claim "claimant-2")))
   (bknr.hashkv:close-store))
 
-(test release-makes-job-claimable-again
+(test release-makes-entry-claimable-again
   (fresh-store)
   (bknr.hashkv:enqueue "retry me")
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "worker-1")
+  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-1")
     (declare (ignore payload))
-    (bknr.hashkv:release-job id))
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "worker-2")
+    (bknr.hashkv:release-claim id))
+  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-2")
     (declare (ignore id))
     (is (string= "retry me" payload)))
   (bknr.hashkv:close-store))

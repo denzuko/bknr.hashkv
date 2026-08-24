@@ -19,7 +19,7 @@
 ;;;; chanl still serializes ad hoc :put/:get/:delete requests through
 ;;;; SUBMIT, as before. That is a request-serialization queue local
 ;;;; to one Lisp image, and is a different thing from the persisted
-;;;; QUEUE-ENTRY job queue below, which is meant to be claimed by
+;;;; QUEUE-ENTRY queue below, which is meant to be claimed by
 ;;;; multiple worker processes. Do not conflate the two.
 
 (defpackage :bknr.hashkv
@@ -36,8 +36,8 @@
            ;; queue
            #:enqueue
            #:dequeue-claim
-           #:ack-job
-           #:release-job
+           #:ack-claim
+           #:release-claim
            #:reclaim-stale-claims
            ;; maintenance
            #:sweep-expired
@@ -95,20 +95,20 @@ the two strings hold identical characters, so the index reader finds
 nothing for an entry that class-instances still reports correctly."))
 
 (bknr.datastore:defpersistent-class queue-entry (bknr.ttl:timestamped-entry)
-  ((job-id :initarg :job-id :accessor entry-job-id
+  ((token-id :initarg :token-id :accessor entry-token-id
            :index-type bknr.indices:string-unique-index
-           :index-reader entry-with-job-id)
+           :index-reader entry-with-token-id)
    (sequence-number :initarg :sequence-number :accessor entry-sequence-number)
    (payload :initarg :payload :accessor entry-payload)
    (claimed-by :initarg :claimed-by :accessor entry-claimed-by :initform nil)
    (claimed-at :initarg :claimed-at :accessor entry-claimed-at :initform nil))
-  (:documentation "A single queued job. Identity (JOB-ID) is
-generated, never a content hash. Two jobs with identical PAYLOADs are
-two distinct entries, which content-addressing would wrongly
-collapse. Named JOB-ID rather than ID specifically because ID
+  (:documentation "A single queued entry. Identity (TOKEN-ID) is
+generated, never a content hash. Two entries with identical PAYLOADs
+are two distinct entries, which content-addressing would wrongly
+collapse. Named TOKEN-ID rather than ID specifically because ID
 collides with bknr.datastore:store-object's own internal identity
 slot, which the datastore expects to be an auto-incrementing
-integer. A string job-id in a slot literally named ID triggers a
+integer. A string token-id in a slot literally named ID triggers a
 CASE-FAILURE deep in bknr.datastore's own internals expecting that
 integer. Uses STRING-UNIQUE-INDEX for the same reason KV-ENTRY does:
 plain UNIQUE-INDEX defaults to an EQL hash-table test, which fails
@@ -265,29 +265,30 @@ resulting keys, in the same order as VALUES."
 
 ;;; --- Queue operations -------------------------------------------------------
 
-(defun generate-job-id ()
-  "Generates a probably-unique job id. Collision odds are low enough
+(defun generate-token-id ()
+  "Generates a probably-unique token id. Collision odds are low enough
 for a single-instance queue; a distributed deployment would want a
 stronger id scheme (e.g. a UUID library). Noted as a known limit,
 not solved here."
-  (format nil "job-~(~36R~)-~(~36R~)" (get-universal-time) (random most-positive-fixnum)))
+  (format nil "token-~(~36R~)-~(~36R~)" (get-universal-time) (random most-positive-fixnum)))
 
 (defun enqueue (payload &key expires-in-seconds)
-  "Adds PAYLOAD to the queue and returns its job id. Unlike PUT-VALUE,
-identical payloads always get distinct entries. EXPIRES-IN-SECONDS,
-if given, lets a job expire unclaimed rather than sitting forever."
-  (let ((job-id (generate-job-id)))
+  "Adds PAYLOAD to the queue and returns its token id. Unlike
+PUT-VALUE, identical payloads always get distinct entries.
+EXPIRES-IN-SECONDS, if given, lets an entry expire unclaimed rather
+than sitting forever."
+  (let ((token-id (generate-token-id)))
     (bknr.datastore:with-transaction ()
       (make-instance 'queue-entry
-                      :job-id job-id
+                      :token-id token-id
                       :sequence-number (incf *sequence-counter*)
                       :payload payload
                       :expires-at (expires-at-from expires-in-seconds)))
-    job-id))
+    token-id))
 
-(defun dequeue-claim (worker-id)
-  "Atomically claims the oldest unclaimed, unexpired job for
-WORKER-ID. Returns (VALUES JOB-ID PAYLOAD), or (VALUES NIL NIL) if
+(defun dequeue-claim (claimant-id)
+  "Atomically claims the oldest unclaimed, unexpired entry for
+CLAIMANT-ID. Returns (VALUES TOKEN-ID PAYLOAD), or (VALUES NIL NIL) if
 nothing is claimable. The scan and the claim happen inside one
 transaction so two callers cannot claim the same entry.
 BKNR.DATASTORE:WITH-TRANSACTION only forwards the primary value of
@@ -295,7 +296,7 @@ its body, silently dropping secondary values, so the result is
 captured into outer lexicals via SETF and returned only after
 leaving the transaction form, rather than returning (VALUES ...)
 directly from inside it."
-  (let (result-job-id result-payload)
+  (let (result-token-id result-payload)
     (bknr.datastore:with-transaction ()
       (let* ((now (get-universal-time))
              (claimable (remove-if (lambda (e)
@@ -304,30 +305,30 @@ directly from inside it."
                                     (bknr.datastore:class-instances 'queue-entry)))
              (candidate (first (sort claimable #'< :key #'entry-sequence-number))))
         (when candidate
-          (setf (entry-claimed-by candidate) worker-id
+          (setf (entry-claimed-by candidate) claimant-id
                 (entry-claimed-at candidate) now)
-          (setf result-job-id (entry-job-id candidate)
+          (setf result-token-id (entry-token-id candidate)
                 result-payload (entry-payload candidate)))))
-    (values result-job-id result-payload)))
+    (values result-token-id result-payload)))
 
-(defun ack-job (job-id)
-  "Marks job JOB-ID complete by removing it from the queue. Returns T
-if a matching entry was found and removed, NIL otherwise."
-  (let ((entry (entry-with-job-id job-id)))
+(defun ack-claim (token-id)
+  "Marks entry TOKEN-ID complete by removing it from the queue.
+Returns T if a matching entry was found and removed, NIL otherwise."
+  (let ((entry (entry-with-token-id token-id)))
     (unless entry
-      (return-from ack-job nil))
+      (return-from ack-claim nil))
     (bknr.datastore:with-transaction ()
       (bknr.datastore:delete-object entry))
     t))
 
-(defun release-job (job-id)
-  "Clears the claim on job JOB-ID without removing it, making it
-eligible for DEQUEUE-CLAIM again. The retry path for a worker that
+(defun release-claim (token-id)
+  "Clears the claim on entry TOKEN-ID without removing it, making it
+eligible for DEQUEUE-CLAIM again. The retry path for a claimant that
 failed to finish it. Returns T if a matching entry was found, NIL
 otherwise."
-  (let ((entry (entry-with-job-id job-id)))
+  (let ((entry (entry-with-token-id token-id)))
     (unless entry
-      (return-from release-job nil))
+      (return-from release-claim nil))
     (bknr.datastore:with-transaction ()
       (setf (entry-claimed-by entry) nil
             (entry-claimed-at entry) nil))
@@ -335,7 +336,7 @@ otherwise."
 
 (defun reclaim-stale-claims (&key (older-than-seconds 300))
   "Releases any claim older than OLDER-THAN-SECONDS, so a worker that
-crashed mid-job does not leave its claim stuck forever. Returns the
+crashed mid-claim does not leave its claim stuck forever. Returns the
 count of claims reclaimed."
   (let ((now (get-universal-time))
         (reclaimed 0))
@@ -415,7 +416,7 @@ an OS thread (see *WORKER-STOPPED-CHANNEL*'s docstring for why)."
 (defun submit (op arg)
   "Queues OP (:PUT, :GET, or :DELETE) with ARG on the worker thread and
 blocks until the result is available. START-WORKER must be called
-first. This is the KV request queue, not the QUEUE-ENTRY job queue;
+first. This is the KV request queue, not the QUEUE-ENTRY queue;
 see the file header."
   (unless *request-channel*
     (error "bknr.hashkv worker is not running; call START-WORKER first."))

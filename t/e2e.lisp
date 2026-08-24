@@ -67,37 +67,37 @@ sequential datastore writes."
           do (is (string= value (bknr.hashkv:get-value key)))))
   (bknr.hashkv:close-store))
 
-(test queued-jobs-survive-a-store-restart
-  "Enqueues a job, closes the store, reopens it, and confirms the job
-is still there and still claimable in the right order. The queue
-analogue of ENTRIES-SURVIVE-A-STORE-RESTART, and also a check that
-the sequence counter bootstraps correctly rather than resetting to
-zero and colliding with what is already persisted."
+(test queued-entries-survive-a-store-restart
+  "Enqueues an entry, closes the store, reopens it, and confirms the
+entry is still there and still claimable in the right order. The
+queue analogue of ENTRIES-SURVIVE-A-STORE-RESTART, and also a check
+that the sequence counter bootstraps correctly rather than resetting
+to zero and colliding with what is already persisted."
   (fresh-e2e-store)
   (bknr.hashkv:enqueue "before restart")
   (bknr.hashkv:close-store)
   (bknr.hashkv:open-store *e2e-directory*)
   (bknr.hashkv:enqueue "after restart")
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "worker-1")
+  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-1")
     (declare (ignore id))
     (is (string= "before restart" payload)))
   (bknr.hashkv:close-store))
 
 (test stale-claim-is-reclaimed
-  "Claims a job, then simulates a worker that crashed mid-job by
-back-dating the claim's CLAIMED-AT, and confirms
-RECLAIM-STALE-CLAIMS frees it for another worker rather than leaving
-it stuck forever."
+  "Claims an entry, then simulates a claimant that crashed mid-claim
+by back-dating the claim's CLAIMED-AT, and confirms
+RECLAIM-STALE-CLAIMS frees it for another claimant rather than
+leaving it stuck forever."
   (fresh-e2e-store)
-  (let ((id (bknr.hashkv:enqueue "abandoned job")))
-    (bknr.hashkv:dequeue-claim "worker-1")
-    (let ((entry (bknr.hashkv::entry-with-job-id id)))
+  (let ((id (bknr.hashkv:enqueue "abandoned entry")))
+    (bknr.hashkv:dequeue-claim "claimant-1")
+    (let ((entry (bknr.hashkv::entry-with-token-id id)))
       (bknr.datastore:with-transaction ()
         (setf (bknr.hashkv::entry-claimed-at entry) (- (get-universal-time) 9999))))
     (is (= 1 (bknr.hashkv:reclaim-stale-claims :older-than-seconds 300)))
-    (multiple-value-bind (reclaimed-id payload) (bknr.hashkv:dequeue-claim "worker-2")
+    (multiple-value-bind (reclaimed-id payload) (bknr.hashkv:dequeue-claim "claimant-2")
       (is (string= id reclaimed-id))
-      (is (string= "abandoned job" payload))))
+      (is (string= "abandoned entry" payload))))
   (bknr.hashkv:close-store))
 
 (defun run-e2e ()
