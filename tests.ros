@@ -9,7 +9,7 @@ exec ros -- $0 "$@"
 (let ((root (uiop:pathname-directory-pathname *load-pathname*)))
   (push root asdf:*central-registry*))
 
-(asdf:load-system :bknr.hashkv/tests :verbose nil)
+(ql:quickload :bknr.hashkv/tests :verbose nil)
 
 (defun main (&rest argv)
   "Runs the bknr.hashkv test suite and exits 0 on success, 1 on failure."

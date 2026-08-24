@@ -9,7 +9,7 @@ exec ros -- $0 "$@"
 (let ((root (uiop:pathname-directory-pathname *load-pathname*)))
   (push root asdf:*central-registry*))
 
-(asdf:load-system :bknr.hashkv :verbose nil)
+(ql:quickload :bknr.hashkv :verbose nil)
 
 (defun main (&rest argv)
   "Opens the bknr.hashkv store and starts its worker thread. ARGV is

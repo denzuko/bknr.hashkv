@@ -9,7 +9,7 @@ exec ros -- $0 "$@"
 (let ((root (uiop:pathname-directory-pathname *load-pathname*)))
   (push root asdf:*central-registry*))
 
-(asdf:load-system :bknr.hashkv/docs :verbose nil)
+(ql:quickload :bknr.hashkv/docs :verbose nil)
 
 (defun main (&rest argv)
   "Writes bknr.hashkv's exported docstrings to standard output."

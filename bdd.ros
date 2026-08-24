@@ -9,7 +9,7 @@ exec ros -- $0 "$@"
 (let ((root (uiop:pathname-directory-pathname *load-pathname*)))
   (push root asdf:*central-registry*))
 
-(asdf:load-system :bknr.hashkv/bdd :verbose nil)
+(ql:quickload :bknr.hashkv/bdd :verbose nil)
 
 (defun main (&rest argv)
   "Runs every Scenario in bknr.hashkv.feature and exits 0 on success,
