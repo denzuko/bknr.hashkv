@@ -45,8 +45,8 @@ tears the worker and store back down."
 (test entries-survive-a-store-restart
   "Writes a value, closes the store (simulating a process restart),
 reopens it at the same directory, and confirms the value is still
-retrievable. The guard catches a transaction log that isn't
-actually being flushed or replayed correctly."
+retrievable. The guard catches a transaction log that is not
+being flushed or replayed correctly."
   (fresh-e2e-store)
   (let ((key (bknr.hashkv:put-value "durable value")))
     (bknr.hashkv:close-store)
@@ -72,7 +72,7 @@ sequential datastore writes."
 is still there and still claimable in the right order. The queue
 analogue of ENTRIES-SURVIVE-A-STORE-RESTART, and also a check that
 the sequence counter bootstraps correctly rather than resetting to
-zero and colliding with what's already persisted."
+zero and colliding with what is already persisted."
   (fresh-e2e-store)
   (bknr.hashkv:enqueue "before restart")
   (bknr.hashkv:close-store)

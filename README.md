@@ -18,10 +18,10 @@ expected to show this one failure; it is not masked or hidden.
 This extends `bknr.datastore`; it is not part of the bknr project
 itself. `bknr.indices`, `bknr.impex`, and `bknr.datastore` are sibling
 systems shipped from the bknr project's own repository. This one
-isn't. It's `denzuko/bknr.hashkv`, a separate, independently published
+is not. It is `denzuko/bknr.hashkv`, a separate, independently published
 project. Quicklisp's system namespace is flat, not hierarchical, so
-nothing prevents the dotted name; the repo path is what actually
-discloses provenance, the same reasoning applied to `denzuko/bknr.ttl`
+nothing prevents the dotted name; the repo path is what discloses
+provenance, the same reasoning applied to `denzuko/bknr.ttl`
 below.
 
 ## Architecture
@@ -61,7 +61,7 @@ not the same thing.** `chanl`'s `*request-channel*`/`submit` is a
 request-serialization queue local to one Lisp image, used only for
 ad hoc KV `:put`/`:get`/`:delete` calls. The persisted `queue-entry`
 job queue (`enqueue`/`dequeue-claim`/`ack-job`) is meant to be claimed
-by multiple worker processes and survives a restart. Don't wire one
+by multiple worker processes and survives a restart. Do not wire one
 into the other without thinking through what changes.
 
 **Known scaling limit:** `dequeue-claim` and `reclaim-stale-claims`
@@ -174,14 +174,14 @@ ros run --load t/e2e.lisp --eval '(bknr.hashkv/e2e:run-e2e)' --quit
 `bknr.hashkv/e2e` exercises the worker lifecycle through `submit`
 rather than calling the store functions directly, and includes a
 close-store/open-store cycle to guard against a transaction log that
-looks correct in-process but doesn't actually survive a restart. Both
+looks correct in-process but does not survive a restart. Both
 suites run against scratch datastores under `/tmp/`, deleted and
 recreated before each test.
 
 ### BDD (Gherkin, via sunny-side, no Ruby)
 
-`features/bknr.hashkv.feature` is Gherkin, and it's the thing that
-actually runs, not documentation alongside a separately maintained
+`features/bknr.hashkv.feature` is Gherkin, and it is the thing that
+runs, not documentation alongside a separately maintained
 test suite. `sunny-side` (`denzuko/sunny-side`) is a standalone
 pure-Lisp Gherkin engine: a small hand-rolled parser
 (Feature/Background/Scenario/Given-When-Then-And-But) that turns each
@@ -197,26 +197,26 @@ against `bknr.hashkv` using `fiveam:is`, the same assertion style as
 This replaced an earlier `clucumber`-based version of this layer.
 `clucumber` (`antifuchs/clucumber`) implements only the Lisp side of
 the Cucumber *wire protocol*. Something still has to parse `.feature`
-files and drive it over a socket, and that's the Ruby `cucumber` gem
+files and drive it over a socket, and that is the Ruby `cucumber` gem
 itself, not an optional add-on. That meant a second language toolchain
 (`Gemfile`, `bundle install`, the Ruby `cucumber` CLI) just to run
 tests for a Lisp library, the same "no second thing to operate"
 objection that ruled out Redis and Postgres for the store itself
 applies here too. The trade-off: `sunny-side`'s parser only covers the
-Gherkin subset actually in use (no `Scenario Outline`/`Examples`
+Gherkin subset in use (no `Scenario Outline`/`Examples`
 tables, no data tables, no doc strings, no tags). That is a real
 limit, but a scoped and extendable one rather than an externally
 imposed one.
 
 `sunny-side` was originally written inline in this project
 (`src/gherkin.lisp`) and pulled out into its own repo once it was
-clear the engine wasn't `bknr.hashkv`-specific. Nothing in it touches
+clear the engine was not `bknr.hashkv`-specific. Nothing in it touches
 `bknr.datastore` or anything else here. `bknr.hashkv` is its reference
 consumer, not a special case.
 
 **Lower risk than the rest of this project's unverified pieces:**
 `sunny-side` and `steps.lisp` are code this project owns, not guesses
-at a third-party library's API surface. Still genuinely untested, with
+at a third-party library's API surface. Still untested, with
 no SBCL/Quicklisp available in this environment to run it, so treat it
 as needing a real run before trusting it in CI, same as everything
 else here.

@@ -20,7 +20,7 @@
 ;;;; SUBMIT, as before. That is a request-serialization queue local
 ;;;; to one Lisp image, and is a different thing from the persisted
 ;;;; QUEUE-ENTRY job queue below, which is meant to be claimed by
-;;;; multiple worker processes. Don't conflate the two.
+;;;; multiple worker processes. Do not conflate the two.
 
 (defpackage :bknr.hashkv
   (:use :cl)
@@ -153,7 +153,7 @@ sandbox this was found in)."
 (defun close-store ()
   "Closes the currently open datastore, if one is open. Safe to call
 even if OPEN-STORE was never called: BKNR.DATASTORE:*STORE* is
-genuinely unbound until the first OPEN-STORE, not just NIL, so a bare
+unbound until the first OPEN-STORE, not merely NIL, so a bare
 reference to it would signal UNBOUND-VARIABLE instead of returning
 false."
   (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
@@ -320,7 +320,7 @@ otherwise."
 
 (defun reclaim-stale-claims (&key (older-than-seconds 300))
   "Releases any claim older than OLDER-THAN-SECONDS, so a worker that
-crashed mid-job doesn't leave its claim stuck forever. Returns the
+crashed mid-job does not leave its claim stuck forever. Returns the
 count of claims reclaimed."
   (let ((now (get-universal-time))
         (reclaimed 0))
@@ -337,7 +337,7 @@ count of claims reclaimed."
 
 (defun sweep-expired ()
   "Deletes every expired KV-ENTRY and QUEUE-ENTRY. Thin wrapper over
-bknr.ttl:sweep-expired so callers don't need to depend on :bknr.ttl
+bknr.ttl:sweep-expired so callers do not need to depend on :bknr.ttl
 directly just to run maintenance."
   (bknr.ttl:sweep-expired))
 
@@ -374,7 +374,7 @@ A NIL request on the channel tells the worker to stop."
               (chanl:send (request-reply req) (dispatch-request req)))))))
 
 (defun stop-worker ()
-  "Signals the worker to exit and waits for it to actually finish,
+  "Signals the worker to exit and waits for it to finish,
 via the channel handshake set up in START-WORKER rather than joining
 an OS thread (see *WORKER-STOPPED-CHANNEL*'s docstring for why)."
   (when *request-channel*

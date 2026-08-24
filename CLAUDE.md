@@ -2,7 +2,7 @@
 
 Hand-authored. `denzuko/dps-meta@v1` was tried as the CI-driven
 generator for this file but has a confirmed upstream bug. Its
-"Checkout dps-meta source" step fetches a `v4` ref that doesn't exist
+"Checkout dps-meta source" step fetches a `v4` ref that does not exist
 in that repo, failing unconditionally for every consumer regardless
 of configuration. `.github/workflows/ci.yml` runs real, working CI
 instead (unit, e2e, BDD, and docs, as four separate jobs) via a plain

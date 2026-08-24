@@ -14,7 +14,7 @@
 (defun fresh-store ()
   "Deletes and reopens a scratch datastore, so each test starts
 isolated. Closes any store left open by a prior test that errored
-before reaching its own CLOSE-STORE, so one failure doesn't cascade
+before reaching its own CLOSE-STORE, so one failure does not cascade
 into STORE-ALREADY-OPEN on every test after it."
   (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
     (bknr.hashkv:close-store))
