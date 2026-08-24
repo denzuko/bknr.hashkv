@@ -100,10 +100,9 @@ two distinct entries, which content-addressing would wrongly
 collapse. Named JOB-ID rather than ID specifically because ID
 collides with bknr.datastore:store-object's own internal identity
 slot, which the datastore expects to be an auto-incrementing
-integer. A string job-id in a slot literally named ID triggered a
+integer. A string job-id in a slot literally named ID triggers a
 CASE-FAILURE deep in bknr.datastore's own internals expecting that
-integer. Verified by running the actual test suite, not guessable
-from reading the code."))
+integer."))
 
 (bknr.ttl:register-ttl-class 'kv-entry)
 (bknr.ttl:register-ttl-class 'queue-entry)
@@ -180,7 +179,7 @@ time, or NIL if EXPIRES-IN-SECONDS is NIL (never expires)."
 string. An entry with the same hash is reused rather than duplicated.
 EXPIRES-IN-SECONDS, if given, sets a TTL relative to now. 0 or
 negative expires the entry immediately, not never: NIL means \"no
-TTL.\" Confirmed by direct testing."
+TTL.\""
   (let ((key (hash-value value)))
     (when (entry-with-key key)
       (return-from put-value key))
@@ -196,8 +195,8 @@ VALUE. Use this for named slots (session tokens, counters, config)
 rather than content-addressed blobs. Returns KEY.
 
 EXPIRES-IN-SECONDS 0 or negative expires the entry immediately, not
-never: NIL is what means \"no TTL.\" Confirmed by direct testing, since
-this is easy to get backwards against APIs where 0 disables expiry."
+never: NIL is what means \"no TTL.\" Easy to get backwards against
+APIs where 0 disables expiry instead."
   (bknr.datastore:with-transaction ()
     (let ((existing (entry-with-key key))
           (expires-at (expires-at-from expires-in-seconds)))
@@ -281,11 +280,10 @@ WORKER-ID. Returns (VALUES JOB-ID PAYLOAD), or (VALUES NIL NIL) if
 nothing is claimable. The scan and the claim happen inside one
 transaction so two callers cannot claim the same entry.
 BKNR.DATASTORE:WITH-TRANSACTION only forwards the primary value of
-its body, silently dropping secondary values. Verified directly,
-not guessable from reading the macro's usage elsewhere, so the
-result is captured into outer lexicals via SETF and returned only
-after leaving the transaction form, rather than returning
-(VALUES ...) directly from inside it."
+its body, silently dropping secondary values, so the result is
+captured into outer lexicals via SETF and returned only after
+leaving the transaction form, rather than returning (VALUES ...)
+directly from inside it."
   (let (result-job-id result-payload)
     (bknr.datastore:with-transaction ()
       (let* ((now (get-universal-time))
@@ -370,13 +368,13 @@ A NIL request on the channel tells the worker to stop.
 
 Idempotent: if a worker task already exists and has not reached
 CHANL's :TERMINATED status, this returns the existing task rather
-than starting a second one. Confirmed by direct testing that without
-this guard, a second START-WORKER call (with no intervening
-STOP-WORKER) permanently orphans the first worker task: both tasks
-would end up recv'ing from the same *REQUEST-CHANNEL*, and
-STOP-WORKER only signals and waits for whichever task
-*WORKER-THREAD* currently points at, since that reference gets
-overwritten by the second call. The first task keeps running forever
+than starting a second one. Without this guard, a second
+START-WORKER call (with no intervening STOP-WORKER) permanently
+orphans the first worker task: both tasks would end up recv'ing
+from the same *REQUEST-CHANNEL*, and STOP-WORKER only signals and
+waits for whichever task *WORKER-THREAD* currently points at, since
+that reference gets overwritten by the second call. The first task
+keeps running forever
 with no way to reach it through this API again."
   (when (and *worker-thread*
              (not (eq (chanl:task-status *worker-thread*) :terminated)))
