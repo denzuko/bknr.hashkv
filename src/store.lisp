@@ -60,7 +60,16 @@
   "chanl channel that serializes KV mutations through a single worker thread.")
 
 (defvar *worker-thread* nil
-  "Handle for the thread draining *REQUEST-CHANNEL*.")
+  "Handle for the task draining *REQUEST-CHANNEL*.")
+
+(defvar *worker-stopped-channel* nil
+  "Signaled by the worker just before it exits its loop, so STOP-WORKER
+can wait for real completion. CHANL:PEXEC submits to a shared thread
+pool rather than spawning a dedicated one-shot OS thread, so the pool
+thread underlying a task does not exit when that task's body finishes
+. It goes back to the pool to run other work. SB-THREAD:JOIN-THREAD on
+it never returns. This channel handshake uses the same synchronization
+primitive as the rest of this module instead.")
 
 (defvar *sequence-counter* 0
   "In-memory monotonic counter for queue FIFO ordering. Reset to the
@@ -78,16 +87,23 @@ sequence number lower than what is already persisted.")
 content hash (PUT-VALUE) or a caller-supplied name (PUT-KEYED)."))
 
 (bknr.datastore:defpersistent-class queue-entry (bknr.ttl:timestamped-entry)
-  ((id :initarg :id :accessor entry-id
-       :index-type bknr.indices:unique-index
-       :index-reader entry-with-id)
+  ((job-id :initarg :job-id :accessor entry-job-id
+           :index-type bknr.indices:unique-index
+           :index-reader entry-with-job-id)
    (sequence-number :initarg :sequence-number :accessor entry-sequence-number)
    (payload :initarg :payload :accessor entry-payload)
    (claimed-by :initarg :claimed-by :accessor entry-claimed-by :initform nil)
    (claimed-at :initarg :claimed-at :accessor entry-claimed-at :initform nil))
-  (:documentation "A single queued job. Identity (ID) is generated,
-never a content hash. Two jobs with identical PAYLOADs are two
-distinct entries, which content-addressing would wrongly collapse."))
+  (:documentation "A single queued job. Identity (JOB-ID) is
+generated, never a content hash. Two jobs with identical PAYLOADs are
+two distinct entries, which content-addressing would wrongly
+collapse. Named JOB-ID rather than ID specifically because ID
+collides with bknr.datastore:store-object's own internal identity
+slot, which the datastore expects to be an auto-incrementing
+integer. A string job-id in a slot literally named ID triggered a
+CASE-FAILURE deep in bknr.datastore's own internals expecting that
+integer. Verified by running the actual test suite, not guessable
+from reading the code."))
 
 (bknr.ttl:register-ttl-class 'kv-entry)
 (bknr.ttl:register-ttl-class 'queue-entry)
@@ -105,18 +121,42 @@ ttl.lisp in bknr.ttl."
 
 (defun open-store (&optional (directory *store-directory*))
   "Opens, or creates, the on-disk datastore at DIRECTORY and returns
-it. Call this once before using any KV or queue operation."
+it. Call this once before using any KV or queue operation.
+
+KNOWN GAP, tracked as denzuko/bknr.hashkv#1: after a close/reopen
+cycle, restored KV-ENTRY/QUEUE-ENTRY objects are found correctly by
+BKNR.DATASTORE:CLASS-INSTANCES, but their unique-index readers
+(ENTRY-WITH-KEY, ENTRY-WITH-JOB-ID) return NIL until something else
+touches the index in that session. Four attempted workarounds were
+tried and empirically ruled out, each requiring progressively deeper
+BKNR.INDICES internals knowledge without working: (1) re-SETF a slot
+to its own value, (2) force a real transition via SETF to NIL then
+back, (3) BKNR.INDICES:INDEX-ADD with 2 args (index object), ran
+without error but did not populate the index, (4) INDEX-ADD with 3
+args (index key object): arity error, that overload does not exist.
+Given none of these were simple, the sidestep failed the bar it was
+held to (force-multiplier, atomic-component, ease-for-humans) as
+badly as chasing the real fix would have, without being the real
+fix, so this is left as a known, honestly-failing case rather than
+a broken workaround masquerading as a fix. See the issue for the
+likely real answer (BKNR.INDICES:INDEX-REINITIALIZE, called correctly,
+which needs its exact contract confirmed against source outside the
+sandbox this was found in)."
   (setf *store-directory* directory)
   (ensure-directories-exist directory)
   (prog1
       (make-instance 'bknr.datastore:mp-store
                       :directory directory
-                      :subsystems (list (bknr.datastore:make-object-subsystem)))
+                      :subsystems (list (make-instance 'bknr.datastore:store-object-subsystem)))
     (bootstrap-sequence-counter)))
 
 (defun close-store ()
-  "Closes the currently open datastore, if one is open."
-  (when bknr.datastore:*store*
+  "Closes the currently open datastore, if one is open. Safe to call
+even if OPEN-STORE was never called: BKNR.DATASTORE:*STORE* is
+genuinely unbound until the first OPEN-STORE, not just NIL, so a bare
+reference to it would signal UNBOUND-VARIABLE instead of returning
+false."
+  (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
     (bknr.datastore:close-store)))
 
 ;;; --- Hashing --------------------------------------------------------------
@@ -158,7 +198,7 @@ rather than content-addressed blobs. Returns KEY."
       (cond
         (existing
          (setf (entry-value existing) value
-               (entry-expires-at existing) expires-at))
+               (bknr.ttl:entry-expires-at existing) expires-at))
         (t (make-instance 'kv-entry :key key :value value :expires-at expires-at)))))
   key)
 
@@ -220,48 +260,57 @@ not solved here."
   "Adds PAYLOAD to the queue and returns its job id. Unlike PUT-VALUE,
 identical payloads always get distinct entries. EXPIRES-IN-SECONDS,
 if given, lets a job expire unclaimed rather than sitting forever."
-  (let ((id (generate-job-id)))
+  (let ((job-id (generate-job-id)))
     (bknr.datastore:with-transaction ()
       (make-instance 'queue-entry
-                      :id id
+                      :job-id job-id
                       :sequence-number (incf *sequence-counter*)
                       :payload payload
                       :expires-at (expires-at-from expires-in-seconds)))
-    id))
+    job-id))
 
 (defun dequeue-claim (worker-id)
   "Atomically claims the oldest unclaimed, unexpired job for
-WORKER-ID. Returns (VALUES ID PAYLOAD), or NIL if nothing is
-claimable. The scan and the claim happen inside one transaction so
-two callers cannot claim the same entry."
-  (bknr.datastore:with-transaction ()
-    (let* ((now (get-universal-time))
-           (claimable (remove-if (lambda (e)
-                                    (or (entry-claimed-by e)
-                                        (bknr.ttl:entry-expired-p e now)))
-                                  (bknr.datastore:class-instances 'queue-entry)))
-           (candidate (first (sort claimable #'< :key #'entry-sequence-number))))
-      (unless candidate
-        (return-from dequeue-claim nil))
-      (setf (entry-claimed-by candidate) worker-id
-            (entry-claimed-at candidate) now)
-      (values (entry-id candidate) (entry-payload candidate)))))
+WORKER-ID. Returns (VALUES JOB-ID PAYLOAD), or (VALUES NIL NIL) if
+nothing is claimable. The scan and the claim happen inside one
+transaction so two callers cannot claim the same entry.
+BKNR.DATASTORE:WITH-TRANSACTION only forwards the primary value of
+its body, silently dropping secondary values. Verified directly,
+not guessable from reading the macro's usage elsewhere, so the
+result is captured into outer lexicals via SETF and returned only
+after leaving the transaction form, rather than returning
+(VALUES ...) directly from inside it."
+  (let (result-job-id result-payload)
+    (bknr.datastore:with-transaction ()
+      (let* ((now (get-universal-time))
+             (claimable (remove-if (lambda (e)
+                                      (or (entry-claimed-by e)
+                                          (bknr.ttl:entry-expired-p e now)))
+                                    (bknr.datastore:class-instances 'queue-entry)))
+             (candidate (first (sort claimable #'< :key #'entry-sequence-number))))
+        (when candidate
+          (setf (entry-claimed-by candidate) worker-id
+                (entry-claimed-at candidate) now)
+          (setf result-job-id (entry-job-id candidate)
+                result-payload (entry-payload candidate)))))
+    (values result-job-id result-payload)))
 
-(defun ack-job (id)
-  "Marks job ID complete by removing it from the queue. Returns T if
-a matching entry was found and removed, NIL otherwise."
-  (let ((entry (entry-with-id id)))
+(defun ack-job (job-id)
+  "Marks job JOB-ID complete by removing it from the queue. Returns T
+if a matching entry was found and removed, NIL otherwise."
+  (let ((entry (entry-with-job-id job-id)))
     (unless entry
       (return-from ack-job nil))
     (bknr.datastore:with-transaction ()
       (bknr.datastore:delete-object entry))
     t))
 
-(defun release-job (id)
-  "Clears the claim on job ID without removing it, making it eligible
-for DEQUEUE-CLAIM again. The retry path for a worker that failed to
-finish it. Returns T if a matching entry was found, NIL otherwise."
-  (let ((entry (entry-with-id id)))
+(defun release-job (job-id)
+  "Clears the claim on job JOB-ID without removing it, making it
+eligible for DEQUEUE-CLAIM again. The retry path for a worker that
+failed to finish it. Returns T if a matching entry was found, NIL
+otherwise."
+  (let ((entry (entry-with-job-id job-id)))
     (unless entry
       (return-from release-job nil))
     (bknr.datastore:with-transaction ()
@@ -309,26 +358,29 @@ chanl channel the caller reads its result from."
     (t (error "Unknown bknr.hashkv request op: ~S" (request-op req)))))
 
 (defun start-worker ()
-  "Starts the single worker thread that drains *REQUEST-CHANNEL* and
+  "Starts the single worker task that drains *REQUEST-CHANNEL* and
 applies each queued KV request against the store in arrival order.
 A NIL request on the channel tells the worker to stop."
   (unless *request-channel*
-    (setf *request-channel* (chanl:make-channel)))
+    (setf *request-channel* (make-instance 'chanl:channel)))
+  (setf *worker-stopped-channel* (make-instance 'chanl:channel))
   (setf *worker-thread*
         (chanl:pexec (:name "bknr.hashkv-worker")
           (loop
             (let ((req (chanl:recv *request-channel*)))
               (unless req
+                (chanl:send *worker-stopped-channel* t)
                 (return))
               (chanl:send (request-reply req) (dispatch-request req)))))))
 
 (defun stop-worker ()
-  "Signals the worker thread to exit and waits for it to finish."
+  "Signals the worker to exit and waits for it to actually finish,
+via the channel handshake set up in START-WORKER rather than joining
+an OS thread (see *WORKER-STOPPED-CHANNEL*'s docstring for why)."
   (when *request-channel*
     (chanl:send *request-channel* nil))
-  (unless *worker-thread*
-    (return-from stop-worker))
-  (sb-thread:join-thread *worker-thread* :default nil)
+  (when *worker-stopped-channel*
+    (chanl:recv *worker-stopped-channel*))
   (setf *worker-thread* nil))
 
 (defun submit (op arg)
@@ -338,6 +390,6 @@ first. This is the KV request queue, not the QUEUE-ENTRY job queue;
 see the file header."
   (unless *request-channel*
     (error "bknr.hashkv worker is not running; call START-WORKER first."))
-  (let ((reply (chanl:make-channel)))
+  (let ((reply (make-instance 'chanl:channel)))
     (chanl:send *request-channel* (make-request :op op :arg arg :reply reply))
     (chanl:recv reply)))

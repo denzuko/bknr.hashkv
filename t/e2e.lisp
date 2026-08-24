@@ -18,7 +18,11 @@
 (defvar *e2e-directory* #P"/tmp/bknr.hashkv-e2e-store/")
 
 (defun fresh-e2e-store ()
-  "Deletes and reopens a scratch datastore for e2e isolation."
+  "Deletes and reopens a scratch datastore for e2e isolation. Closes
+any store left open by a prior test that errored before its own
+CLOSE-STORE, matching t/test.lisp's FRESH-STORE."
+  (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
+    (bknr.hashkv:close-store))
   (when (probe-file *e2e-directory*)
     (uiop:delete-directory-tree *e2e-directory* :validate t))
   (bknr.hashkv:open-store *e2e-directory*))
@@ -87,9 +91,9 @@ it stuck forever."
   (fresh-e2e-store)
   (let ((id (bknr.hashkv:enqueue "abandoned job")))
     (bknr.hashkv:dequeue-claim "worker-1")
-    (let ((entry (bknr.bknr.hashkv::entry-with-id id)))
+    (let ((entry (bknr.hashkv::entry-with-job-id id)))
       (bknr.datastore:with-transaction ()
-        (setf (bknr.bknr.hashkv::entry-claimed-at entry) (- (get-universal-time) 9999))))
+        (setf (bknr.hashkv::entry-claimed-at entry) (- (get-universal-time) 9999))))
     (is (= 1 (bknr.hashkv:reclaim-stale-claims :older-than-seconds 300)))
     (multiple-value-bind (reclaimed-id payload) (bknr.hashkv:dequeue-claim "worker-2")
       (is (string= id reclaimed-id))

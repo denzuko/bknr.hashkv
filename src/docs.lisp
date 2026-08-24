@@ -1,14 +1,14 @@
 ;;;; src/docs.lisp
 ;;;;
-;;;; bknr.hashkv's manual, defined with 40ants-doc.
-;;;;
-;;;; NOTE: 40ants-doc:document's exact keyword arguments have changed
-;;;; across that library's history. Confirm the current signature
-;;;; locally before relying on this in CI.
+;;;; bknr.hashkv's manual, defined with 40ants-doc, rendered with
+;;;; 40ants-doc-full/builder:render-to-string (verified against an
+;;;; actual installed copy; the system that has DOCUMENT does not
+;;;; exist under that name).
 
 (defpackage :bknr.hashkv/docs
   (:use :cl)
-  (:import-from #:40ants-doc #:defsection #:document)
+  (:import-from #:40ants-doc #:defsection)
+  (:import-from #:40ants-doc-full/builder #:render-to-string)
   (:export #:@bknr.hashkv-manual
            #:generate))
 
@@ -36,4 +36,4 @@ bknr.datastore, both with TTL via bknr.ttl:timestamped-entry."
 
 (defun generate (&optional (stream *standard-output*) (format :markdown))
   "Renders @BKNR.HASHKV-MANUAL to STREAM in FORMAT (:markdown or :html)."
-  (document @bknr.hashkv-manual :stream stream :format format))
+  (write-string (render-to-string @bknr.hashkv-manual :format format) stream))

@@ -12,7 +12,12 @@
 (defvar *test-directory* #P"/tmp/bknr.hashkv-test-store/")
 
 (defun fresh-store ()
-  "Deletes and reopens a scratch datastore, so each test starts isolated."
+  "Deletes and reopens a scratch datastore, so each test starts
+isolated. Closes any store left open by a prior test that errored
+before reaching its own CLOSE-STORE, so one failure doesn't cascade
+into STORE-ALREADY-OPEN on every test after it."
+  (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
+    (bknr.hashkv:close-store))
   (when (probe-file *test-directory*)
     (uiop:delete-directory-tree *test-directory* :validate t))
   (bknr.hashkv:open-store *test-directory*))

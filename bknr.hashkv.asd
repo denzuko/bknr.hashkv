@@ -22,7 +22,7 @@
 (asdf:defsystem "bknr.hashkv/docs"
   :description "40ants-doc manual definition for bknr.hashkv."
   :license "BSD-3-Clause"
-  :depends-on ("bknr.hashkv" "40ants-doc")
+  :depends-on ("bknr.hashkv" "40ants-doc" "40ants-doc-full")
   :pathname "src/"
   :components ((:file "docs")))
 
