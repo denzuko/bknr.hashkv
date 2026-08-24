@@ -4,17 +4,6 @@ bknr.hashkv is a content-addressable key/value store plus a persisted
 job queue, both built over `bknr.datastore`, implemented in Common
 Lisp.
 
-**Known limitation:** after a process restart (closing then reopening
-the store at the same directory), restored entries are found
-correctly by `bknr.datastore:class-instances`, but the auto-generated
-unique-index lookups (`get-value`, and `dequeue-claim`'s job-id path)
-return nothing for them until something else touches the index during
-that session. Tracked as
-[denzuko/bknr.hashkv#1](https://github.com/denzuko/bknr.hashkv/issues/1),
-along with four workarounds that were tried and ruled out. The e2e
-suite's CI job is expected to show this one failure, and it is left
-visible there rather than masked or hidden.
-
 ## Naming
 
 This library extends `bknr.datastore` rather than belonging to the
@@ -254,9 +243,8 @@ built around its needs alone.
 Every suite listed above, including this one, has been run to
 completion against a real SBCL and Quicklisp install rather than left
 as a written-but-unexecuted test file: `bknr.hashkv/tests` at
-nineteen checks, `bknr.hashkv/e2e` at eleven of twelve (the one
-failure being the known restart limitation above), and
-`bknr.hashkv/bdd` at six.
+nineteen checks, `bknr.hashkv/e2e` at twelve, and `bknr.hashkv/bdd`
+at six, all passing.
 
 ## Documentation
 

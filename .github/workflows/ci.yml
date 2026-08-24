@@ -45,14 +45,6 @@ jobs:
 
   e2e-tests:
     runs-on: ubuntu-latest
-    # KNOWN, TRACKED FAILURE: denzuko/bknr.hashkv#1. Restored objects
-    # are found correctly via BKNR.DATASTORE:CLASS-INSTANCES, but
-    # their unique-index readers (ENTRY-WITH-KEY, ENTRY-WITH-JOB-ID)
-    # return NIL after a close/reopen cycle until something else
-    # touches the index. This job is expected to fail on exactly one
-    # test (ENTRIES-SURVIVE-A-STORE-RESTART) until that is resolved.
-    # See the issue rather than treating this red status as a
-    # surprise or masking it.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,7 +75,7 @@ jobs:
           ln -s "$GITHUB_WORKSPACE/bknr.ttl" ~/.roswell/lisp/quicklisp/local-projects/bknr.ttl
           ln -s "$GITHUB_WORKSPACE/sunny-side" ~/.roswell/lisp/quicklisp/local-projects/sunny-side
 
-      - name: Run e2e suite (see denzuko/bknr.hashkv#1 for the one known failure)
+      - name: Run e2e suite
         working-directory: bknr.hashkv
         run: ./e2e.ros
 

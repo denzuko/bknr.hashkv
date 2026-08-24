@@ -80,15 +80,23 @@ sequence number lower than what is already persisted.")
 
 (bknr.datastore:defpersistent-class kv-entry (bknr.ttl:timestamped-entry)
   ((key :initarg :key :accessor entry-key
-        :index-type bknr.indices:unique-index
+        :index-type bknr.indices:string-unique-index
         :index-reader entry-with-key)
    (value :initarg :value :accessor entry-value))
   (:documentation "A single stored value, indexed by KEY, either a
-content hash (PUT-VALUE) or a caller-supplied name (PUT-KEYED)."))
+content hash (PUT-VALUE) or a caller-supplied name (PUT-KEYED). Uses
+STRING-UNIQUE-INDEX rather than plain UNIQUE-INDEX because
+UNIQUE-INDEX's hash-table defaults to an EQL test, which only
+matches identical string objects, not equal string content.
+STRING-UNIQUE-INDEX uses an EQUAL test instead. Without this, a
+key deserialized fresh from the transaction log after a restart is
+never EQL to the key string that indexed it originally, even though
+the two strings hold identical characters, so the index reader finds
+nothing for an entry that class-instances still reports correctly."))
 
 (bknr.datastore:defpersistent-class queue-entry (bknr.ttl:timestamped-entry)
   ((job-id :initarg :job-id :accessor entry-job-id
-           :index-type bknr.indices:unique-index
+           :index-type bknr.indices:string-unique-index
            :index-reader entry-with-job-id)
    (sequence-number :initarg :sequence-number :accessor entry-sequence-number)
    (payload :initarg :payload :accessor entry-payload)
@@ -102,7 +110,10 @@ collides with bknr.datastore:store-object's own internal identity
 slot, which the datastore expects to be an auto-incrementing
 integer. A string job-id in a slot literally named ID triggers a
 CASE-FAILURE deep in bknr.datastore's own internals expecting that
-integer."))
+integer. Uses STRING-UNIQUE-INDEX for the same reason KV-ENTRY does:
+plain UNIQUE-INDEX defaults to an EQL hash-table test, which fails
+to match a string key deserialized fresh after a restart against the
+string that indexed it originally, even with identical content."))
 
 (bknr.ttl:register-ttl-class 'kv-entry)
 (bknr.ttl:register-ttl-class 'queue-entry)
