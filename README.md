@@ -22,9 +22,7 @@ discloses provenance here, the same reasoning that applies to
 `bknr.hashkv.asd` defines five systems: `bknr.hashkv`,
 `bknr.hashkv/docs`, `bknr.hashkv/tests`, `bknr.hashkv/e2e`, and
 `bknr.hashkv/bdd`, each paired with a thin `.ros` wrapper where one
-applies (`bknr.hashkv.ros`, `docs.ros`, `tests.ros`, `bdd.ros`). Core
-functionality lives entirely in `src/`, never in the wrapper scripts
-themselves.
+applies (`bknr.hashkv.ros`, `docs.ros`, `tests.ros`, `bdd.ros`).
 
 | Component            | Responsibility                                                        |
 |-----------------------|------------------------------------------------------------------------|
