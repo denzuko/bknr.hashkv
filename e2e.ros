@@ -1,0 +1,19 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -Q -- $0 "$@"
+|#
+(progn
+  (ros:ensure-asdf))
+
+(let ((root (uiop:pathname-directory-pathname *load-pathname*)))
+  (push root asdf:*central-registry*))
+
+(asdf:load-system :bknr.hashkv/e2e :verbose nil)
+
+(defun main (&rest argv)
+  "Runs the bknr.hashkv e2e suite and exits 0 on success, 1 on
+failure. One known, tracked failure is expected here until
+denzuko/bknr.hashkv#1 is resolved."
+  (declare (ignorable argv))
+  (uiop:quit (if (bknr.hashkv/e2e:run-e2e) 0 1)))

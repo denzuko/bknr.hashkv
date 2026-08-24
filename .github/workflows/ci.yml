@@ -41,7 +41,7 @@ jobs:
 
       - name: Run unit suite
         working-directory: bknr.hashkv
-        run: ros -e '(ql:quickload :bknr.hashkv/tests :verbose nil)' -e '(uiop:quit (if (bknr.hashkv/tests:run-tests) 0 1))'
+        run: ./tests.ros
 
   e2e-tests:
     runs-on: ubuntu-latest
@@ -85,7 +85,7 @@ jobs:
 
       - name: Run e2e suite (see denzuko/bknr.hashkv#1 for the one known failure)
         working-directory: bknr.hashkv
-        run: ros -e '(ql:quickload :bknr.hashkv/e2e :verbose nil)' -e '(uiop:quit (if (bknr.hashkv/e2e:run-e2e) 0 1))'
+        run: ./e2e.ros
 
   bdd-tests:
     runs-on: ubuntu-latest
@@ -121,7 +121,7 @@ jobs:
 
       - name: Run BDD suite
         working-directory: bknr.hashkv
-        run: ros -e '(ql:quickload :bknr.hashkv/bdd :verbose nil)' -e '(uiop:quit (if (bknr.hashkv/bdd:run-bdd) 0 1))'
+        run: ./bdd.ros
 
   docs:
     runs-on: ubuntu-latest
@@ -157,4 +157,4 @@ jobs:
 
       - name: Confirm the manual renders
         working-directory: bknr.hashkv
-        run: ros -e '(ql:quickload :bknr.hashkv/docs :verbose nil)' -e '(bknr.hashkv/docs:generate)' -e '(uiop:quit 0)'
+        run: ./docs.ros
