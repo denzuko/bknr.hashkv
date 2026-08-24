@@ -178,7 +178,9 @@ time, or NIL if EXPIRES-IN-SECONDS is NIL (never expires)."
 (defun put-value (value &key expires-in-seconds)
   "Stores VALUE under its content hash and returns the hash as a
 string. An entry with the same hash is reused rather than duplicated.
-EXPIRES-IN-SECONDS, if given, sets a TTL relative to now."
+EXPIRES-IN-SECONDS, if given, sets a TTL relative to now. 0 or
+negative expires the entry immediately, not never: NIL means \"no
+TTL.\" Confirmed by direct testing."
   (let ((key (hash-value value)))
     (when (entry-with-key key)
       (return-from put-value key))
@@ -191,7 +193,11 @@ EXPIRES-IN-SECONDS, if given, sets a TTL relative to now."
   "Stores VALUE under the caller-supplied KEY, overwriting any
 existing entry at that key. Unlike PUT-VALUE, KEY is not derived from
 VALUE. Use this for named slots (session tokens, counters, config)
-rather than content-addressed blobs. Returns KEY."
+rather than content-addressed blobs. Returns KEY.
+
+EXPIRES-IN-SECONDS 0 or negative expires the entry immediately, not
+never: NIL is what means \"no TTL.\" Confirmed by direct testing, since
+this is easy to get backwards against APIs where 0 disables expiry."
   (bknr.datastore:with-transaction ()
     (let ((existing (entry-with-key key))
           (expires-at (expires-at-from expires-in-seconds)))
@@ -360,7 +366,21 @@ chanl channel the caller reads its result from."
 (defun start-worker ()
   "Starts the single worker task that drains *REQUEST-CHANNEL* and
 applies each queued KV request against the store in arrival order.
-A NIL request on the channel tells the worker to stop."
+A NIL request on the channel tells the worker to stop.
+
+Idempotent: if a worker task already exists and has not reached
+CHANL's :TERMINATED status, this returns the existing task rather
+than starting a second one. Confirmed by direct testing that without
+this guard, a second START-WORKER call (with no intervening
+STOP-WORKER) permanently orphans the first worker task: both tasks
+would end up recv'ing from the same *REQUEST-CHANNEL*, and
+STOP-WORKER only signals and waits for whichever task
+*WORKER-THREAD* currently points at, since that reference gets
+overwritten by the second call. The first task keeps running forever
+with no way to reach it through this API again."
+  (when (and *worker-thread*
+             (not (eq (chanl:task-status *worker-thread*) :terminated)))
+    (return-from start-worker *worker-thread*))
   (unless *request-channel*
     (setf *request-channel* (make-instance 'chanl:channel)))
   (setf *worker-stopped-channel* (make-instance 'chanl:channel))

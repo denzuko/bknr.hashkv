@@ -65,6 +65,18 @@ into STORE-ALREADY-OPEN on every test after it."
   (bknr.hashkv:stop-worker)
   (bknr.hashkv:close-store))
 
+(test start-worker-is-idempotent
+  "Found by adversarial testing: a second START-WORKER call used to
+orphan the first worker task permanently, since STOP-WORKER only
+ever signals whichever task *WORKER-THREAD* currently points at."
+  (fresh-store)
+  (bknr.hashkv:start-worker)
+  (let ((first-task bknr.hashkv::*worker-thread*))
+    (bknr.hashkv:start-worker)
+    (is (eq first-task bknr.hashkv::*worker-thread*)))
+  (bknr.hashkv:stop-worker)
+  (bknr.hashkv:close-store))
+
 ;;; --- KV: caller-keyed ---------------------------------------------------
 
 (test put-keyed-uses-caller-supplied-key
