@@ -50,7 +50,7 @@ jobs:
     # their unique-index readers (ENTRY-WITH-KEY, ENTRY-WITH-JOB-ID)
     # return NIL after a close/reopen cycle until something else
     # touches the index. This job is expected to fail on exactly one
-    # test (ENTRIES-SURVIVE-A-STORE-RESTART) until that's resolved.
+    # test (ENTRIES-SURVIVE-A-STORE-RESTART) until that is resolved.
     # See the issue rather than treating this red status as a
     # surprise or masking it.
     steps:
