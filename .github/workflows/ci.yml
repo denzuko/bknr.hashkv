@@ -11,18 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: bknr.hashkv
-      - uses: actions/checkout@v4
-        with:
-          repository: denzuko/bknr.ttl
-          ref: develop
-          path: bknr.ttl
-      - uses: actions/checkout@v4
-        with:
-          repository: denzuko/sunny-side
-          ref: develop
-          path: sunny-side
 
       - name: Install Roswell, sbcl-bin, qlot
         run: |
@@ -33,32 +21,16 @@ jobs:
           ros install qlot
           echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
 
-      - name: Link sibling dependencies into Quicklisp local-projects
-        run: |
-          mkdir -p ~/.roswell/lisp/quicklisp/local-projects
-          ln -s "$GITHUB_WORKSPACE/bknr.ttl" ~/.roswell/lisp/quicklisp/local-projects/bknr.ttl
-          ln -s "$GITHUB_WORKSPACE/sunny-side" ~/.roswell/lisp/quicklisp/local-projects/sunny-side
+      - name: qlot install
+        run: qlot install
 
       - name: Run unit suite
-        working-directory: bknr.hashkv
-        run: ./tests.ros
+        run: qlot exec ./tests.ros
 
   e2e-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: bknr.hashkv
-      - uses: actions/checkout@v4
-        with:
-          repository: denzuko/bknr.ttl
-          ref: develop
-          path: bknr.ttl
-      - uses: actions/checkout@v4
-        with:
-          repository: denzuko/sunny-side
-          ref: develop
-          path: sunny-side
 
       - name: Install Roswell, sbcl-bin, qlot
         run: |
@@ -69,32 +41,16 @@ jobs:
           ros install qlot
           echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
 
-      - name: Link sibling dependencies into Quicklisp local-projects
-        run: |
-          mkdir -p ~/.roswell/lisp/quicklisp/local-projects
-          ln -s "$GITHUB_WORKSPACE/bknr.ttl" ~/.roswell/lisp/quicklisp/local-projects/bknr.ttl
-          ln -s "$GITHUB_WORKSPACE/sunny-side" ~/.roswell/lisp/quicklisp/local-projects/sunny-side
+      - name: qlot install
+        run: qlot install
 
       - name: Run e2e suite
-        working-directory: bknr.hashkv
-        run: ./e2e.ros
+        run: qlot exec ./e2e.ros
 
   bdd-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: bknr.hashkv
-      - uses: actions/checkout@v4
-        with:
-          repository: denzuko/bknr.ttl
-          ref: develop
-          path: bknr.ttl
-      - uses: actions/checkout@v4
-        with:
-          repository: denzuko/sunny-side
-          ref: develop
-          path: sunny-side
 
       - name: Install Roswell, sbcl-bin, qlot
         run: |
@@ -105,32 +61,16 @@ jobs:
           ros install qlot
           echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
 
-      - name: Link sibling dependencies into Quicklisp local-projects
-        run: |
-          mkdir -p ~/.roswell/lisp/quicklisp/local-projects
-          ln -s "$GITHUB_WORKSPACE/bknr.ttl" ~/.roswell/lisp/quicklisp/local-projects/bknr.ttl
-          ln -s "$GITHUB_WORKSPACE/sunny-side" ~/.roswell/lisp/quicklisp/local-projects/sunny-side
+      - name: qlot install
+        run: qlot install
 
       - name: Run BDD suite
-        working-directory: bknr.hashkv
-        run: ./bdd.ros
+        run: qlot exec ./bdd.ros
 
   docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: bknr.hashkv
-      - uses: actions/checkout@v4
-        with:
-          repository: denzuko/bknr.ttl
-          ref: develop
-          path: bknr.ttl
-      - uses: actions/checkout@v4
-        with:
-          repository: denzuko/sunny-side
-          ref: develop
-          path: sunny-side
 
       - name: Install Roswell, sbcl-bin, qlot
         run: |
@@ -141,12 +81,8 @@ jobs:
           ros install qlot
           echo "$HOME/.roswell/bin" >> "$GITHUB_PATH"
 
-      - name: Link sibling dependencies into Quicklisp local-projects
-        run: |
-          mkdir -p ~/.roswell/lisp/quicklisp/local-projects
-          ln -s "$GITHUB_WORKSPACE/bknr.ttl" ~/.roswell/lisp/quicklisp/local-projects/bknr.ttl
-          ln -s "$GITHUB_WORKSPACE/sunny-side" ~/.roswell/lisp/quicklisp/local-projects/sunny-side
+      - name: qlot install
+        run: qlot install
 
       - name: Confirm the manual renders
-        working-directory: bknr.hashkv
-        run: ./docs.ros
+        run: qlot exec ./docs.ros

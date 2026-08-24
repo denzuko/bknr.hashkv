@@ -106,26 +106,38 @@ to reason about.
 ```sh
 ros init bknr.hashkv
 ros install qlot
-qlot add bknr.datastore chanl lparallel ironclad babel fiveam
+qlot install
 ```
 
 `bknr.ttl` and `sunny-side` live in separate repositories
-(`denzuko/bknr.ttl`, `denzuko/sunny-side`) that are not yet published
-to Quicklisp or Ultralisp. Until they are, clone both as sibling
-directories and either symlink them into `.qlot/local-projects/` or
-`~/.roswell/local-projects/`, or add them as qlot local overrides.
+(`denzuko/bknr.ttl`, `denzuko/sunny-side`) not yet published to
+Quicklisp or Ultralisp. `qlfile`, committed alongside this README,
+tells qlot to fetch both directly from their git repositories rather
+than from a package dist:
 
-No `QUICKLISP_HOME` export or `qlot exec` wrapper is required at
-invocation time beyond that. Once qlot has been used against the
-project once, the Roswell script header places `.qlot/` on the load
-path automatically for every subsequent run.
+```
+git bknr.ttl https://github.com/denzuko/bknr.ttl.git :branch develop
+git sunny-side https://github.com/denzuko/sunny-side.git :branch develop
+```
+
+`qlot install` resolves this automatically; no manual cloning,
+symlinking, or local-projects configuration is needed. Every script
+in this repository (`./tests.ros`, `./e2e.ros`, `./bdd.ros`,
+`./docs.ros`, `./bknr.hashkv.ros`) must then be run through
+`qlot exec`, since the git-resolved dependencies live in this
+project's local `.qlot/` dist rather than the global Quicklisp
+install a bare `ros` invocation would see:
+
+```sh
+qlot exec ./tests.ros
+```
 
 ## Usage
 
 Open the store and start the worker:
 
 ```sh
-./bknr.hashkv.ros
+qlot exec ./bknr.hashkv.ros
 ```
 
 From a REPL loading the `:bknr.hashkv` system directly:
@@ -181,15 +193,15 @@ Three FiveAM/Gherkin suites are kept separate, matching the umbrella
 system layout above:
 
 ```sh
-./tests.ros   # unit: bknr.hashkv/tests, exercises PUT-VALUE/GET-VALUE
-              # and the rest of the KV/queue API directly, one
-              # behavior per test
+qlot exec ./tests.ros   # unit: bknr.hashkv/tests, exercises
+                         # PUT-VALUE/GET-VALUE and the rest of the
+                         # KV/queue API directly, one behavior per test
 ```
 
 ```sh
-./e2e.ros     # bknr.hashkv/e2e, exercises the worker lifecycle
-              # through submit rather than calling the store
-              # functions directly
+qlot exec ./e2e.ros     # bknr.hashkv/e2e, exercises the worker
+                         # lifecycle through submit rather than
+                         # calling the store functions directly
 ```
 
 `bknr.hashkv/e2e` includes a close-store/open-store cycle to guard
@@ -212,7 +224,7 @@ against `bknr.hashkv` using `fiveam:is`, the same assertion style
 used throughout `t/test.lisp` and `t/e2e.lisp`.
 
 ```sh
-./bdd.ros
+qlot exec ./bdd.ros
 ```
 
 This replaced an earlier version of this layer built on `clucumber`.
@@ -247,7 +259,7 @@ at six, all passing.
 ## Documentation
 
 ```sh
-./docs.ros
+qlot exec ./docs.ros
 ```
 
 This renders `@BKNR.HASHKV-MANUAL`, defined in `src/docs.lisp`,

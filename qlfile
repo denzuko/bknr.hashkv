@@ -1,0 +1,2 @@
+git bknr.ttl https://github.com/denzuko/bknr.ttl.git :branch develop
+git sunny-side https://github.com/denzuko/sunny-side.git :branch develop
