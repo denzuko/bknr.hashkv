@@ -1,12 +1,15 @@
 # CLAUDE.md
 
-Hand-authored. `.github/workflows/ci.yml` invokes
-`denzuko/dps-meta@v1` (`type: lisp-actor`) on GitHub's own runners.
-The first run failed (`git config meta.application is not set`)
-because git config set locally in the scaffolding environment never
-reaches a fresh CI checkout; the workflow now sets those keys as a CI
-step directly. This file should still be treated as a placeholder
-until a successful Action run regenerates it for real.
+Hand-authored. `denzuko/dps-meta@v1` was tried as the CI-driven
+generator for this file but has a confirmed upstream bug. Its
+"Checkout dps-meta source" step fetches a `v4` ref that doesn't exist
+in that repo, failing unconditionally for every consumer regardless
+of configuration. `.github/workflows/ci.yml` runs real, working CI
+instead (unit, e2e, BDD, and docs, as four separate jobs) via a plain
+Roswell/qlot install, matching `denzuko/edm-engine`'s proven pattern.
+This file remains a hand-authored placeholder; regenerate via
+`dps-meta` once its upstream bug is fixed, or hand-maintain it going
+forward.
 
 ## Project Identity
 

@@ -3,6 +3,16 @@
 A content-addressable key/value store plus a persisted job queue,
 both over `bknr.datastore`, implemented in Common Lisp.
 
+**Known limitation, disclosed up front:** after a process restart
+(close then reopen the store at the same directory), restored entries
+are found correctly by `bknr.datastore:class-instances`, but the
+auto-generated unique-index lookups (`get-value`, and `dequeue-claim`'s
+job-id path) return nothing for them until something else touches the
+index in that session. Tracked as
+[denzuko/bknr.hashkv#1](https://github.com/denzuko/bknr.hashkv/issues/1),
+including four ruled-out workarounds. The e2e suite's CI job is
+expected to show this one failure; it is not masked or hidden.
+
 ## Naming
 
 This extends `bknr.datastore`; it is not part of the bknr project
