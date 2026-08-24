@@ -101,7 +101,26 @@ one shared persistence substrate, `bknr.datastore`, across the rest of
 the organization's projects rather than three separate storage models
 to reason about.
 
-## Setup
+## Depending on bknr.hashkv from your own project
+
+`bknr.hashkv`, `bknr.ttl`, and `sunny-side` are not yet published to
+Quicklisp or Ultralisp, so add all three to your own project's
+`qlfile` as git sources. qlot does not resolve a dependency's own
+git-sourced dependencies transitively, so all three need to be
+listed explicitly rather than `bknr.hashkv` alone:
+
+```
+git bknr.hashkv https://github.com/denzuko/bknr.hashkv.git :branch develop
+git bknr.ttl https://github.com/denzuko/bknr.ttl.git :branch develop
+git sunny-side https://github.com/denzuko/sunny-side.git :branch develop
+```
+
+```sh
+qlot install
+qlot exec ros -e '(ql:quickload :bknr.hashkv)'
+```
+
+## Development
 
 ```sh
 ros init bknr.hashkv
@@ -109,60 +128,44 @@ ros install qlot
 qlot install
 ```
 
-`bknr.ttl` and `sunny-side` live in separate repositories
-(`denzuko/bknr.ttl`, `denzuko/sunny-side`) not yet published to
-Quicklisp or Ultralisp. `qlfile`, committed alongside this README,
-tells qlot to fetch both directly from their git repositories rather
-than from a package dist:
-
-```
-git bknr.ttl https://github.com/denzuko/bknr.ttl.git :branch develop
-git sunny-side https://github.com/denzuko/sunny-side.git :branch develop
-```
-
-`qlot install` resolves this automatically; no manual cloning,
-symlinking, or local-projects configuration is needed. Every script
-in this repository (`./tests.ros`, `./e2e.ros`, `./bdd.ros`,
-`./docs.ros`, `./bknr.hashkv.ros`) must then be run through
-`qlot exec`, since the git-resolved dependencies live in this
-project's local `.qlot/` dist rather than the global Quicklisp
-install a bare `ros` invocation would see:
+`qlfile`, committed alongside this README, resolves `bknr.ttl` and
+`sunny-side` the same way described above. Every script in this
+repository (`./tests.ros`, `./e2e.ros`, `./bdd.ros`, `./docs.ros`,
+`./bknr.hashkv.ros`) needs to run through `qlot exec`, since the
+git-resolved dependencies live in this project's local `.qlot/` dist
+rather than the global Quicklisp install a bare `ros` invocation
+would see:
 
 ```sh
 qlot exec ./tests.ros
 ```
 
+`qlot exec ros build <script>.ros` compiles a standalone binary from
+the exact dependency versions pinned in `qlfile.lock`. The result
+runs directly, with no `qlot exec` wrapper needed at invocation time;
+useful for CI steps that run the same script repeatedly, or for
+distributing a built tool rather than the source scripts.
+
 ## Usage
 
-Open the store and start the worker:
-
-```sh
-qlot exec ./bknr.hashkv.ros
-```
-
-From a REPL loading the `:bknr.hashkv` system directly:
+The KV store works standalone, with no worker and no queue involved.
+This is the default and most common way to use it: an embeddable
+key/value store for any project, the same way you would reach for a
+NoSQL library, not something that requires adopting a job-queue
+architecture to get value from.
 
 ```lisp
 (bknr.hashkv:open-store)
-(bknr.hashkv:start-worker)
 
-(bknr.hashkv:submit :put "hello world")   ;=> "b94d27b9934d3e08a52e52d7da7dacefb..."
-(bknr.hashkv:submit :get *)               ;=> "hello world"
-(bknr.hashkv:submit :delete *)            ;=> T
+(let ((key (bknr.hashkv:put-value "hello world")))
+  (bknr.hashkv:get-value key)      ;=> "hello world"
+  (bknr.hashkv:delete-value key))  ;=> T
 
-(bknr.hashkv:stop-worker)
 (bknr.hashkv:close-store)
 ```
 
-Batch hashing bypasses the worker entirely and parallelizes across
-the `lparallel` kernel directly:
-
-```lisp
-(bknr.hashkv:batch-put '(1 2 3 "four"))
-```
-
 Caller-supplied keys and TTL, for named slots rather than
-content-addressed blobs:
+content-addressed blobs, still with no worker involved:
 
 ```lisp
 (bknr.hashkv:put-keyed "session:abc123" "user-42" :expires-in-seconds 3600)
@@ -170,8 +173,41 @@ content-addressed blobs:
                                             ;   then NIL (lazy expiry)
 ```
 
-The persisted job queue, which is separate from the
-`start-worker`/`submit` KV request queue shown above:
+Batch hashing parallelizes across the `lparallel` kernel directly,
+also without a worker:
+
+```lisp
+(bknr.hashkv:batch-put '(1 2 3 "four"))
+```
+
+### Optional: the chanl request worker
+
+For code that wants simple, serialized concurrent access without
+managing its own locking, `start-worker`/`submit` route KV operations
+through a single `chanl` worker thread. This is a convenience layered
+on top of the plain API above, not a requirement for using the store:
+
+```sh
+qlot exec ./bknr.hashkv.ros
+```
+
+```lisp
+(bknr.hashkv:open-store)
+(bknr.hashkv:start-worker)
+
+(let ((key (bknr.hashkv:submit :put "hello world")))
+  (bknr.hashkv:submit :get key)      ;=> "hello world"
+  (bknr.hashkv:submit :delete key))  ;=> T
+
+(bknr.hashkv:stop-worker)
+(bknr.hashkv:close-store)
+```
+
+### The persisted job queue
+
+A separate capability built on the same store, for the common case
+where a project also needs job-queue semantics. Independent of the
+KV store and independent of the `chanl` request worker above:
 
 ```lisp
 (bknr.hashkv:enqueue '(:resize-thumbnail "media/abc.jpg"))
