@@ -16,7 +16,7 @@ forward.
 | Field        | Value |
 |--------------|-------|
 | Application  | bknr.hashkv |
-| Description  | Content-addressable key/value store plus a persisted job queue over bknr.datastore |
+| Description  | Content-addressable key/value store plus a persisted, TTL-aware generic queue over bknr.datastore |
 | Type         | Common Lisp library |
 | Version      | 1.0.0 |
 | Branch       | develop |
@@ -51,11 +51,11 @@ code → changelog → merge → tag
 ## Do Not
 
 - Do not add a network protocol, pub/sub, or eviction policy to this
-  library. It is a KV store and job queue meant to be embedded as a
-  library, not a Redis clone; see README's "Architecture" section for
-  the reasoning.
+  library. It is a KV store and a generic queue meant to be embedded
+  as a library, not a Redis clone; see README's "Architecture"
+  section for the reasoning.
 - Do not conflate the `chanl` request-serialization queue (`submit`,
-  local to one Lisp image) with the persisted `queue-entry` job queue
+  local to one Lisp image) with the persisted `queue-entry` structure
   (`enqueue`/`dequeue-claim`, meant for multiple worker processes).
   See README.
 - Do not use `bknr.ttl/metaclass-spike` without first verifying it

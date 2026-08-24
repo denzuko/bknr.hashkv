@@ -1,8 +1,14 @@
 # bknr.hashkv
 
-bknr.hashkv is a content-addressable key/value store plus a persisted
-job queue, both built over `bknr.datastore`, implemented in Common
-Lisp.
+bknr.hashkv is a content-addressable key/value store with a
+persisted, TTL-aware generic queue, both built over
+`bknr.datastore`, implemented in Common Lisp. "Generic" matters here:
+the queue's payload has no type constraint and its ordering, claim,
+and acknowledgment primitives carry no job-execution assumptions, so
+the same store supports patterns from a simple work queue up through
+caller-built dependency-graph (DAG) orchestration on top of the
+existing primitives, without requiring a rules engine or any other
+addition to reach that.
 
 ## Naming
 
@@ -54,7 +60,7 @@ Two different "queue" concepts appear in this codebase, and they are
 not the same thing. `chanl`'s `*request-channel*` and `submit`
 implement a request-serialization queue local to a single Lisp image,
 used only for ad hoc KV `:put`/`:get`/`:delete` calls. The persisted
-`queue-entry` job queue (`enqueue`, `dequeue-claim`, `ack-job`) is
+`queue-entry` structure (`enqueue`, `dequeue-claim`, `ack-job`) is
 built to be claimed by multiple worker processes and to survive a
 restart. Wiring one into the other without working through what that
 change means is a mistake worth avoiding.
@@ -95,10 +101,11 @@ This project deliberately avoids attempting to be a Redis clone: no
 pub/sub, no wire protocol, no eviction policy, and no replication.
 Those features solve the problem of *being* Redis, which is a
 different problem from the one this library targets. The actual goal
-is a key/value store and a job queue that other projects can embed as
-an ordinary library dependency, with no second service to operate and
-one shared persistence substrate, `bknr.datastore`, across the rest of
-the organization's projects rather than three separate storage models
+is a key/value store and a generic queue that other projects can
+embed as an ordinary library dependency, with no second service to
+operate and one shared persistence substrate, `bknr.datastore`,
+across the rest of the organization's projects rather than three
+separate storage models
 to reason about.
 
 ## Depending on bknr.hashkv from your own project
@@ -203,11 +210,15 @@ qlot exec ./bknr.hashkv.ros
 (bknr.hashkv:close-store)
 ```
 
-### The persisted job queue
+### The persisted generic queue
 
 A separate capability built on the same store, for the common case
-where a project also needs job-queue semantics. Independent of the
-KV store and independent of the `chanl` request worker above:
+where a project needs a work queue: FIFO by default, but with an
+arbitrary payload and a claim/acknowledge cycle general enough to
+support caller-built dependency ordering (a DAG of related entries)
+on top, not something restricted to job-execution semantics.
+Independent of the KV store and independent of the `chanl` request
+worker above:
 
 ```lisp
 (bknr.hashkv:enqueue '(:resize-thumbnail "media/abc.jpg"))
