@@ -56,7 +56,7 @@ code → changelog → merge → tag
   section for the reasoning.
 - Do not conflate the `chanl` request-serialization queue (`submit`,
   local to one Lisp image) with the persisted `queue-entry` structure
-  (`enqueue`/`dequeue-claim`, meant for multiple worker processes).
+  (`enqueue`/`dequeue-claim`, meant for multiple claimant processes).
   See README.
 - Do not use `bknr.ttl/metaclass-spike` without first verifying it
   against `bknr.datastore`'s transaction-logging internals. See

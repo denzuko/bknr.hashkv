@@ -5,7 +5,7 @@
 ;;;; rationale, which applies here too).
 
 (asdf:defsystem "bknr.hashkv"
-  :description "Content-addressable key/value store plus a persisted job queue over bknr.datastore, with chanl-based KV request serialization and lparallel batch hashing."
+  :description "Content-addressable key/value store plus a persisted, TTL-aware generic queue over bknr.datastore, with chanl-based KV request serialization and lparallel batch hashing."
   :author "Dwight Spencer"
   :license "BSD-3-Clause"
   :version "1.0.0"

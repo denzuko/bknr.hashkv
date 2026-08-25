@@ -46,11 +46,11 @@ Two separate structures share the same store on purpose:
   explicitly keyed through `put-keyed`, for named slots such as
   sessions or counters.
 - `queue-entry`'s identity is always generated, never content-derived,
-  because two independently enqueued jobs with identical payloads
+  because two independently enqueued entries with identical payloads
   need to stay two separate entries; content-addressing would
   wrongly collapse them into one. Ordering is FIFO through a sequence
   number, claiming (`dequeue-claim`) is atomic, and stale claims left
-  behind by a worker that died mid-job are reclaimable through
+  behind by a claimant that died mid-claim are reclaimable through
   `reclaim-stale-claims`.
 
 Both classes inherit TTL from `bknr.ttl:timestamped-entry` rather
@@ -61,7 +61,7 @@ not the same thing. `chanl`'s `*request-channel*` and `submit`
 implement a request-serialization queue local to a single Lisp image,
 used only for ad hoc KV `:put`/`:get`/`:delete` calls. The persisted
 `queue-entry` structure (`enqueue`, `dequeue-claim`, `ack-claim`) is
-built to be claimed by multiple worker processes and to survive a
+built to be claimed by multiple claimant processes and to survive a
 restart. Wiring one into the other without working through what that
 change means is a mistake worth avoiding.
 
@@ -69,11 +69,12 @@ change means is a mistake worth avoiding.
 both enumerate every `queue-entry` and scan and sort the result in
 Lisp, which is O(n) per claim. Measured directly against a single
 SBCL process running an unbuffered `mp-store` with no other load:
-1.2ms per claim at 1,000 unclaimed jobs, 4.8ms at 10,000, and 29.2ms
-at 50,000, which works out to roughly 34 claims per second at that
-depth. This is fine for most job-queue workloads, with a real ceiling
-somewhere in the tens of thousands of *simultaneously unclaimed*
-jobs, not total jobs ever processed over the store's lifetime.
+1.2ms per claim at 1,000 unclaimed entries, 4.8ms at 10,000, and
+29.2ms at 50,000, which works out to roughly 34 claims per second at
+that depth. This is fine for most queue workloads, with a real
+ceiling somewhere in the tens of thousands of *simultaneously
+unclaimed* entries, not total entries ever processed over the
+store's lifetime.
 `bknr.indices` ships hash-table-backed indices (`unique-index`,
 `hash-index`, `hash-list-index`) but no ordered or range index, so
 there is no built-in equivalent of a partial B-tree the way Postgres
@@ -86,8 +87,8 @@ written against `bknr.indices`' documented extension protocol.
 Neither improvement is implemented yet.
 
 **Concurrency:** twenty real `chanl` threads racing to claim fifty
-jobs, rather than the single-threaded test suite alone, claimed every
-job exactly once with zero duplicates. The atomic-claim guarantee
+entries, rather than the single-threaded test suite alone, claimed
+every entry exactly once with zero duplicates. The atomic-claim guarantee
 holds under genuine concurrent access, confirmed against actual
 threads rather than assumed from the transaction wrapper's design.
 
@@ -158,7 +159,7 @@ distributing a built tool rather than the source scripts.
 The KV store works standalone, with no worker and no queue involved.
 This is the default and most common way to use it: an embeddable
 key/value store for any project, the same way you would reach for a
-NoSQL library, not something that requires adopting a job-queue
+NoSQL library, not something that requires adopting a queue-processing
 architecture to get value from.
 
 ```lisp
