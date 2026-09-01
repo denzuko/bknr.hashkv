@@ -56,6 +56,14 @@
 (defvar *worker-kernel* nil
   "lparallel kernel used for parallel hashing during batch operations.")
 
+(defvar *worker-kernel-lock* (bt:make-lock)
+  "Guards *WORKER-KERNEL*'s lazy initialization. Without this,
+concurrent first calls to ENSURE-KERNEL could each see *WORKER-KERNEL*
+as NIL, each create their own kernel, and leak all but the one that
+wins the race: a real, found (not hypothetical) gap, matching the
+same dedicated-lparallel-kernel-under-lock pattern tdrhq/bknr-datastore
+uses for exactly this reason.")
+
 (defvar *request-channel* nil
   "chanl channel that serializes KV mutations through a single worker thread.")
 
@@ -242,11 +250,13 @@ removed, or NIL if no entry existed under KEY."
     t))
 
 (defun ensure-kernel ()
-  "Lazily initializes the lparallel kernel used for batch hashing."
-  (when *worker-kernel*
-    (return-from ensure-kernel *worker-kernel*))
-  (setf *worker-kernel* (lparallel:make-kernel 4))
-  *worker-kernel*)
+  "Lazily initializes the lparallel kernel used for batch hashing.
+Locked, not a plain check-then-set: without the lock, two threads
+calling this concurrently for the first time could both see
+*WORKER-KERNEL* as NIL and both create a kernel, leaking one."
+  (bt:with-lock-held (*worker-kernel-lock*)
+    (or *worker-kernel*
+        (setf *worker-kernel* (lparallel:make-kernel 4)))))
 
 (defun batch-put (values)
   "Hashes VALUES in parallel across the lparallel kernel, then writes

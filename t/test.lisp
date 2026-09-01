@@ -56,6 +56,23 @@ into STORE-ALREADY-OPEN on every test after it."
     (is (string= (first keys) (bknr.hashkv:put-value 1))))
   (bknr.hashkv:close-store))
 
+(test ensure-kernel-is-safe-under-concurrent-first-call
+  ;; A real, found race condition, not a hypothetical one: without a
+  ;; lock, concurrent first calls to ENSURE-KERNEL could each see
+  ;; *WORKER-KERNEL* as NIL and each create their own kernel,
+  ;; leaking all but the one that wins the race. This launches many
+  ;; threads at once and confirms they all converge on exactly one
+  ;; kernel object, beyond only confirming no error is signaled.
+  (setf bknr.hashkv::*worker-kernel* nil)
+  (let* ((n 50)
+         (results (make-array n))
+         (threads (loop for i from 0 below n
+                         collect (let ((idx i))
+                                   (bt:make-thread
+                                    (lambda () (setf (aref results idx) (bknr.hashkv::ensure-kernel))))))))
+    (mapc #'bt:join-thread threads)
+    (is (= 1 (length (remove-duplicates (coerce results 'list)))))))
+
 (test submit-round-trips-through-worker
   (fresh-store)
   (bknr.hashkv:start-worker)
