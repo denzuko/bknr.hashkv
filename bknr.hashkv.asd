@@ -44,6 +44,6 @@
 (asdf:defsystem "bknr.hashkv/bdd"
   :description "Step definitions for bknr.hashkv's Gherkin feature, running as ordinary FiveAM tests via sunny-side (denzuko/sunny-side), a standalone Gherkin-over-FiveAM engine. No Ruby, no wire protocol, no subprocess."
   :license "BSD-3-Clause"
-  :depends-on ("bknr.hashkv" "sunny-side" "fiveam")
+  :depends-on ("bknr.hashkv" "sunny-side" "fiveam" "bordeaux-threads" "uiop")
   :pathname "features/step_definitions/"
   :components ((:file "steps")))

@@ -27,3 +27,39 @@ Feature: Content-addressable key/value storage
   Scenario: Getting a key that was never stored returns nothing
     When I get a key that was never stored
     Then getting that key should return nothing
+
+  Scenario: An empty string is a storable value
+    When I put "" into the store
+    Then getting that key should return ""
+
+  Scenario: A zero TTL expires the entry immediately
+    When I put "short lived" into the store with a TTL of 0 seconds
+    Then getting that key should return nothing
+
+  Scenario: Storing a value again after it expired makes it readable again
+    When I put "renewed" into the store with a TTL of 0 seconds
+    And I put "renewed" into the store again
+    Then getting that key should return "renewed"
+
+  Scenario: The content hash ignores the caller's printer settings
+    When I put the list 1 2 3 into the store while print length is 2
+    And I put the list 1 2 99 into the store while print length is 2
+    Then the two list keys should differ
+
+  Scenario: A caller-supplied key shaped like a content hash is rejected
+    When I put "forged" under the key of "genuine"
+    Then the put should signal a reserved key error
+
+  Scenario: A value with no readable printed form is rejected
+    When I put an unreadable object into the store
+    Then the put should signal a print error
+
+  Scenario: Concurrent puts of the same value all succeed with one key
+    When 8 threads put "contended" into the store at once
+    Then no put should have signalled an error
+    And every put should have returned the same key
+
+  Scenario: A stored value survives a store restart
+    When I put "durable" into the store
+    And the store is closed and reopened
+    Then getting that key should return "durable"
