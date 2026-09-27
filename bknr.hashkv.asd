@@ -47,3 +47,10 @@
   :depends-on ("bknr.hashkv" "sunny-side" "fiveam" "bordeaux-threads" "uiop")
   :pathname "features/step_definitions/"
   :components ((:file "steps")))
+
+(asdf:defsystem "bknr.hashkv/ci"
+  :description "40ants-ci definition of the GitHub Actions workflow."
+  :license "BSD-3-Clause"
+  :depends-on ("bknr.hashkv" "40ants-ci")
+  :pathname "src/"
+  :components ((:file "ci")))
