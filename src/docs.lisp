@@ -22,6 +22,7 @@ bknr.datastore. Both entry types expire through bknr.ttl."
   (bknr.hashkv:delete-value function)
   (bknr.hashkv:batch-put function)
   (bknr.hashkv:reserved-key-error condition)
+  (bknr.hashkv:unstorable-value-error condition)
   (bknr.hashkv:enqueue function)
   (bknr.hashkv:dequeue-claim function)
   (bknr.hashkv:ack-claim function)

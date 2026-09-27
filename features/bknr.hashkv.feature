@@ -50,9 +50,14 @@ Feature: Content-addressable key/value storage
     When I put "forged" under the key of "genuine"
     Then the put should signal a reserved key error
 
-  Scenario: A value with no readable printed form is rejected
-    When I put an unreadable object into the store
+  Scenario: A persistent object is rejected as a content-addressed value
+    When I put a persistent object into the store by content
     Then the put should signal a print error
+
+  Scenario: A persistent object is stored under a caller-supplied key
+    When I put a persistent object with damage 4 under the key "ref:1"
+    And the store is closed and reopened
+    Then getting "ref:1" should return the persistent object with damage 4
 
   Scenario: Concurrent puts of the same value all succeed with one key
     When 8 threads put "contended" into the store at once

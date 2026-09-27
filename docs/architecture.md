@@ -14,20 +14,25 @@ flowchart TB
     kv["Key/value API<br/>put-value, put-keyed, get-value,<br/>delete-value, batch-put"]
     queue["Queue API<br/>enqueue, dequeue-claim, ack-claim,<br/>release-claim, reclaim-stale-claims"]
     worker["Optional worker<br/>start-worker, submit, stop-worker"]
+    value["Value layer<br/>stored-form, value-from-form<br/>(copies; instances as slot lists)"]
     store["hashkv-store<br/>(mp-store subclass; holds the worker)"]
   end
   ttl["bknr.ttl<br/>timestamped-entry, sweep-expired"]
   ds["bknr.datastore<br/>(denzuko fork)<br/>snapshot + transaction log"]
   idx["bknr.indices<br/>string-unique-index on key and token-id"]
   crypto["ironclad + babel<br/>SHA-256 keys, OS PRNG token ids"]
-  lp["lparallel<br/>batch hashing"]
+  lp["lparallel<br/>batch conversion and hashing"]
   ch["chanl<br/>worker task and channels"]
+  mop["closer-mop<br/>class slots"]
 
   caller --> kv
   caller --> queue
   caller --> worker
   worker --> kv
   worker --> ch
+  kv --> value
+  queue --> value
+  value --> mop
   kv --> crypto
   kv --> lp
   queue --> crypto
@@ -41,26 +46,36 @@ flowchart TB
 
 ## Key/value write path
 
-The lookup that decides between creating and updating an entry runs
-inside the same transaction as the write. A concurrent put of the same
-value therefore finds the entry the first put created, and no
-transaction fails on the unique index.
+The value is converted to its stored form before the transaction: a
+fresh copy made only of types the transaction log can write, with class
+instances as slot lists. The lookup that decides between creating and
+updating an entry runs inside the same transaction as the write. A
+concurrent put of the same value therefore finds the entry the first
+put created, and no transaction fails on the unique index. Reads return
+a copy rebuilt from the stored form.
 
 ```mermaid
 sequenceDiagram
   participant C as Caller
   participant P as put-value / put-keyed
+  participant V as stored-form
   participant S as store-entry
   participant G as Store guard (with-transaction)
   participant I as Key index
 
   C->>P: value [, key], expires-in-seconds
+  P->>V: value
+  alt storable
+    V-->>P: fresh stored form
+  else function, stream, cycle, ...
+    V-->>C: unstorable-value-error
+  end
   alt put-value
-    P->>P: hash-value under with-standard-io-syntax
+    P->>P: key = SHA-256 of stored form, standard syntax
   else put-keyed
     P->>P: reject 64-hex keys (reserved-key-error)
   end
-  P->>S: key, value, expiry
+  P->>S: key, stored form, expiry
   S->>G: acquire
   G->>I: entry-with-key key
   alt entry exists

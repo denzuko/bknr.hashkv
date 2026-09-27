@@ -28,6 +28,10 @@ for a game object such as a spell effect."))
   "A structure standing in for a game object."
   damage)
 
+(bknr.datastore:defpersistent-class persistent-effect ()
+  ((damage :initarg :damage :reader persistent-effect-damage))
+  (:documentation "A bknr persistent class, stored by reference."))
+
 (defun make-effect (name damage)
   "Returns an EFFECT named NAME with DAMAGE, given as a digit string."
   (make-instance 'effect :name name :damage (parse-integer damage)))
@@ -123,9 +127,18 @@ every token id claimed."
       (let ((key (bknr.hashkv:put-value genuine)))
         (setf (world-signalled world) (signalled-by (lambda () (bknr.hashkv:put-keyed key value))))))
 
-    (When! "^I put an unreadable object into the store$" ()
-      (setf (world-signalled world)
-            (signalled-by (lambda () (bknr.hashkv:put-value (make-instance 'standard-object))))))
+    (When! "^I put a persistent object into the store by content$" ()
+      (let ((object (bknr.datastore:with-transaction () (make-instance 'persistent-effect :damage 1))))
+        (setf (world-signalled world) (signalled-by (lambda () (bknr.hashkv:put-value object))))))
+
+    (When! "^I put a persistent object with damage (\\d+) under the key \"([^\"]*)\"$" (damage key)
+      (bknr.hashkv:put-keyed key (bknr.datastore:with-transaction ()
+                                   (make-instance 'persistent-effect :damage (parse-integer damage)))))
+
+    (Then! "^getting \"([^\"]*)\" should return the persistent object with damage (\\d+)$" (key damage)
+      (let ((value (bknr.hashkv:get-value key)))
+        (is (typep value 'persistent-effect))
+        (is (eql (parse-integer damage) (persistent-effect-damage value)))))
 
     (When! "^(\\d+) threads put \"([^\"]*)\" into the store at once$" (count value)
       (multiple-value-bind (keys errors)

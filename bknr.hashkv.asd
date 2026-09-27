@@ -1,24 +1,23 @@
 ;;;; bknr.hashkv.asd
-;;;;
-;;;; Extends bknr.datastore and depends on bknr.ttl (denzuko/bknr.ttl,
-;;;; a separate repo. See that project's README for the naming
-;;;; rationale, which applies here too).
 
 (asdf:defsystem "bknr.hashkv"
-  :description "Content-addressable key/value store plus a persisted, TTL-aware generic queue over bknr.datastore, with chanl-based KV request serialization and lparallel batch hashing."
+  :description "Content-addressed key/value store and persisted queue over bknr.datastore, with expiry through bknr.ttl."
   :author "Dwight Spencer"
   :license "BSD-3-Clause"
   :version "1.1.0"
   :depends-on ("bknr.datastore"
                "bknr.ttl"
                "chanl"
+               "closer-mop"
                "lparallel"
                "bordeaux-threads"
                "ironclad"
                "babel")
   :pathname "src/"
   :serial t
-  :components ((:file "store")))
+  :components ((:file "package")
+               (:file "value")
+               (:file "store")))
 
 (asdf:defsystem "bknr.hashkv/docs"
   :description "40ants-doc manual definition for bknr.hashkv."

@@ -2,13 +2,16 @@
 ;;;;
 ;;;; Two persisted structures share one bknr.datastore store.
 ;;;;
-;;;;   KV-ENTRY     Keyed by the SHA-256 of the value's standard printed
-;;;;                form (PUT-VALUE) or by a caller-supplied name
+;;;;   KV-ENTRY     Keyed by the SHA-256 of the value's stored form
+;;;;                (PUT-VALUE) or by a caller-supplied name
 ;;;;                (PUT-KEYED). Names shaped like a content hash are
 ;;;;                reserved for PUT-VALUE.
 ;;;;
 ;;;;   QUEUE-ENTRY  Keyed by a random token id, so identical payloads
 ;;;;                remain separate entries. Claimed in object id order.
+;;;;
+;;;; Values and payloads are stored as the form STORED-FORM returns and
+;;;; read back through VALUE-FROM-FORM (src/value.lisp).
 ;;;;
 ;;;; Every read that decides a write happens inside the same
 ;;;; WITH-TRANSACTION as the write. The mp-store guard serializes
@@ -18,33 +21,6 @@
 ;;;; The chanl worker (START-WORKER, SUBMIT) serializes KV requests
 ;;;; within one Lisp image. It does not read or write the persisted
 ;;;; queue.
-
-(defpackage :bknr.hashkv
-  (:use :cl)
-  (:export ;; store lifecycle
-           #:open-store
-           #:close-store
-           ;; KV
-           #:put-value
-           #:put-keyed
-           #:get-value
-           #:delete-value
-           #:batch-put
-           #:reserved-key-error
-           #:reserved-key-error-key
-           ;; queue
-           #:enqueue
-           #:dequeue-claim
-           #:ack-claim
-           #:release-claim
-           #:reclaim-stale-claims
-           ;; maintenance
-           #:sweep-expired
-           ;; chanl request worker (KV only)
-           #:start-worker
-           #:stop-worker
-           #:worker-running-p
-           #:submit))
 
 (in-package :bknr.hashkv)
 
@@ -128,15 +104,19 @@ nothing when no store is open."
 
 ;;; --- Keys and TTL ---------------------------------------------------------
 
-(defun hash-value (value)
-  "Returns the hex SHA-256 digest of VALUE printed readably under standard
-I/O syntax, so the caller's printer settings and current package do not
-change the key. Signals PRINT-NOT-READABLE for values with no readable
-printed form."
+(defun form-hash (form)
+  "Returns the hex SHA-256 digest of FORM, a stored form, printed readably
+under standard I/O syntax, so the caller's printer settings and current
+package do not change the key. Signals PRINT-NOT-READABLE when FORM holds
+a persistent store object, which has no readable printed form."
   (ironclad:byte-array-to-hex-string
    (ironclad:digest-sequence
-    :sha256 (babel:string-to-octets (with-standard-io-syntax (prin1-to-string value))
+    :sha256 (babel:string-to-octets (with-standard-io-syntax (prin1-to-string form))
                                     :encoding :utf-8))))
+
+(defun hash-value (value)
+  "Returns the content key PUT-VALUE would store VALUE under."
+  (form-hash (stored-form value)))
 
 (defun content-key-p (key)
   "True when KEY is 64 lowercase hex digits, the form HASH-VALUE returns."
@@ -173,22 +153,28 @@ of BODY, or NIL."
 ;;; --- KV operations --------------------------------------------------------
 
 (defun put-value (value &key expires-in-seconds)
-  "Stores VALUE under its content hash and returns the hash. Storing a
-value that is already present replaces its expiry with the one given
-here, so a re-put renews an expired or expiring entry. EXPIRES-IN-SECONDS
-NIL means no expiry; 0 or a negative number expires the entry at once.
-Signals PRINT-NOT-READABLE when VALUE has no readable printed form."
-  (store-entry (hash-value value) value expires-in-seconds))
+  "Stores a copy of VALUE under the hash of its stored form and returns the
+hash. Equal values, including instances of the same class with equal
+slots, share one key. Storing a value that is already present replaces
+its expiry with the one given here, so a re-put renews an expired or
+expiring entry. EXPIRES-IN-SECONDS NIL means no expiry; 0 or a negative
+number expires the entry at once. Signals UNSTORABLE-VALUE-ERROR as
+STORED-FORM does, and PRINT-NOT-READABLE when VALUE holds a persistent
+store object; store those with PUT-KEYED."
+  (let ((form (stored-form value)))
+    (store-entry (form-hash form) form expires-in-seconds)))
 
 (defun put-keyed (key value &key expires-in-seconds)
-  "Stores VALUE under the string KEY, replacing any value and expiry
-already there, and returns KEY. Use for named slots such as sessions or
-counters. EXPIRES-IN-SECONDS follows PUT-VALUE. Signals
-RESERVED-KEY-ERROR when KEY has the form of a content hash."
+  "Stores a copy of VALUE under the string KEY, replacing any value and
+expiry already there, and returns KEY. Use for named slots such as
+sessions or counters, and for values that hold persistent store
+objects. EXPIRES-IN-SECONDS follows PUT-VALUE. Signals
+RESERVED-KEY-ERROR when KEY has the form of a content hash, and
+UNSTORABLE-VALUE-ERROR as STORED-FORM does."
   (check-type key string)
   (when (content-key-p key)
     (error 'reserved-key-error :key key))
-  (store-entry key value expires-in-seconds))
+  (store-entry key (stored-form value) expires-in-seconds))
 
 (defun expire-key (key)
   "Deletes the entry under KEY if it is still expired when the transaction runs."
@@ -197,12 +183,13 @@ RESERVED-KEY-ERROR when KEY has the form of a content hash."
       (bknr.datastore:delete-object entry))))
 
 (defun get-value (key)
-  "Returns the value under KEY, or NIL when there is none or it has
-expired. An expired entry is deleted when read."
+  "Returns a fresh copy of the value under KEY, or NIL when there is none
+or it has expired. An expired entry is deleted when read. Changing the
+returned value does not change the store."
   (let ((entry (entry-with-key key)))
     (cond ((null entry) nil)
           ((bknr.ttl:entry-expired-p entry) (expire-key key) nil)
-          (t (entry-value entry)))))
+          (t (value-from-form (entry-value entry))))))
 
 (defun delete-value (key)
   "Deletes the entry under KEY. Returns T when an entry was deleted, NIL
@@ -220,14 +207,27 @@ kernel for this call and ends it before returning."
              (unwind-protect (funcall function)
                (lparallel:end-kernel :wait t))))))
 
+(defun form-and-hash (value)
+  "Returns (hash . stored-form) for VALUE, or the error the conversion
+signalled. Returning the error keeps it out of the lparallel worker,
+whose default is to enter the debugger in its own thread."
+  (handler-case (let ((form (stored-form value)))
+                  (cons (form-hash form) form))
+    (error (condition) condition)))
+
 (defun batch-put (values &key expires-in-seconds)
-  "Hashes VALUES in parallel, then stores each one as PUT-VALUE would, in
-order, one transaction per value. Returns the keys in the order of
-VALUES. The batch is not atomic: an error leaves earlier values stored.
+  "Converts and hashes VALUES in parallel, then stores each one as
+PUT-VALUE would, in order, one transaction per value. Returns the keys in
+the order of VALUES. Every value is converted before any is stored, so
+an unstorable value stores nothing and its error is signalled in the
+caller's thread; an error while storing leaves earlier values stored.
 Bind LPARALLEL:*KERNEL* to reuse a kernel across calls."
-  (mapcar (lambda (key value) (store-entry key value expires-in-seconds))
-          (call-with-kernel (lambda () (lparallel:pmap 'list #'hash-value values)))
-          values))
+  (let* ((entries (call-with-kernel (lambda () (lparallel:pmap 'list #'form-and-hash values))))
+         (failure (find-if (lambda (entry) (typep entry 'condition)) entries)))
+    (when failure
+      (error failure))
+    (mapcar (lambda (entry) (store-entry (car entry) (cdr entry) expires-in-seconds))
+            entries)))
 
 ;;; --- Queue operations -------------------------------------------------------
 
@@ -238,16 +238,17 @@ same *RANDOM-STATE*."
   (ironclad:byte-array-to-hex-string (ironclad:random-data 16)))
 
 (defun enqueue (payload &key expires-in-seconds)
-  "Adds PAYLOAD to the queue and returns its token id. Identical payloads
-become separate entries. With EXPIRES-IN-SECONDS, an entry still
-unclaimed at that time is no longer claimable and is removed by
-SWEEP-EXPIRED."
+  "Adds a copy of PAYLOAD to the queue and returns its token id. Identical
+payloads become separate entries. With EXPIRES-IN-SECONDS, an entry
+still unclaimed at that time is no longer claimable and is removed by
+SWEEP-EXPIRED. Signals UNSTORABLE-VALUE-ERROR as STORED-FORM does."
   (let ((token-id (generate-token-id))
+        (form (stored-form payload))
         (expires-at (expires-at-from expires-in-seconds)))
     (bknr.datastore:with-transaction ()
       (make-instance 'queue-entry
                      :token-id token-id
-                     :payload payload
+                     :payload form
                      :expires-at expires-at))
     token-id))
 
@@ -270,9 +271,10 @@ lowest id is the earliest enqueue. One pass; ENTRIES is not modified."
 
 (defun dequeue-claim (claimant-id)
   "Claims the oldest claimable entry for CLAIMANT-ID. Returns
-(VALUES TOKEN-ID PAYLOAD), or (VALUES NIL NIL) when nothing is
-claimable. The search and the claim run in one transaction."
-  (destructuring-bind (&optional token-id . payload)
+(VALUES TOKEN-ID PAYLOAD), with PAYLOAD a fresh copy, or (VALUES NIL NIL)
+when nothing is claimable. The search and the claim run in one
+transaction."
+  (destructuring-bind (&optional token-id . form)
       (bknr.datastore:with-transaction ()
         (let* ((now (get-universal-time))
                (entry (oldest-claimable (queue-entries) now)))
@@ -280,7 +282,7 @@ claimable. The search and the claim run in one transaction."
             (setf (entry-claimed-by entry) claimant-id
                   (entry-claimed-at entry) now)
             (cons (entry-token-id entry) (entry-payload entry)))))
-    (values token-id payload)))
+    (values token-id (value-from-form form))))
 
 (defun clear-claim (entry)
   "Removes any claim on ENTRY. Call inside a transaction."

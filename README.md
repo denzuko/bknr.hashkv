@@ -39,12 +39,29 @@ and closes the store.
 (bknr.hashkv:close-store)
 ```
 
+### What can be stored
+
+Values and queue payloads may be numbers other than complex numbers,
+characters, symbols, strings, lists, arrays, hash tables, instances of
+named standard classes and structures, and bknr persistent objects, in
+any nesting. Instances of plain classes and structures are stored slot
+by slot and rebuilt with `allocate-instance` on read, so
+`initialize-instance` does not run; slots the class no longer has are
+skipped. Persistent objects are stored as references.
+
+Every put stores a copy and every read returns a fresh copy, so
+changing a value after storing it, or after reading it, does not change
+the store. Functions, streams, conditions, complex numbers and values
+that contain themselves signal `unstorable-value-error` at the put.
+Persistent objects have no content form: store values that hold them
+with `put-keyed`, not `put-value`.
+
 ### Content-addressed values
 
-`put-value` stores a value under the SHA-256 of its readable printed
-form and returns that key. The key does not depend on the caller's
-printer settings or current package. Values without a readable printed
-form, such as most CLOS instances, signal `print-not-readable`.
+`put-value` stores a value under the SHA-256 of its stored form and
+returns that key. Equal values, including instances of one class with
+equal slots, share a key. The key does not depend on the caller's
+printer settings or current package.
 
 ```lisp
 (let ((key (bknr.hashkv:put-value "hello world")))
