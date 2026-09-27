@@ -140,6 +140,10 @@
     (bknr.hashkv::expire-key "renewed")
     (is (string= "v" (bknr.hashkv:get-value "renewed")))))
 
+(test expire-key-on-missing-key-returns-nil
+  (with-fresh-store
+    (is-false (bknr.hashkv::expire-key "absent"))))
+
 (test sweep-expired-counts-removed-entries
   (with-fresh-store
     (bknr.hashkv:put-keyed "gone" 1 :expires-in-seconds -1)
@@ -163,6 +167,14 @@
     (dotimes (i 5) (bknr.hashkv:enqueue i))
     (bknr.hashkv:dequeue-claim "c1")
     (is (= 5 (length (bknr.hashkv::queue-entries))))))
+
+(test dequeue-claim-orders-by-sequence-number-not-index-order
+  (with-fresh-store
+    (bknr.hashkv:enqueue "later")
+    (let ((token (bknr.hashkv:enqueue "earlier")))
+      (bknr.datastore:with-transaction ()
+        (setf (bknr.hashkv::entry-sequence-number (bknr.hashkv::entry-with-token-id token)) 0))
+      (is (equal "earlier" (nth-value 1 (bknr.hashkv:dequeue-claim "c1")))))))
 
 (test release-of-unknown-token-returns-nil
   (with-fresh-store
@@ -199,6 +211,12 @@
     (bknr.hashkv:start-worker)
     (bknr.hashkv:stop-worker)
     (bknr.hashkv:stop-worker)
+    (is-false (bknr.hashkv:worker-running-p))))
+
+(test worker-running-p-is-false-for-a-terminated-task
+  (let ((bknr.hashkv::*worker-thread* (chanl:pexec () nil)))
+    (loop until (eq :terminated (chanl:task-status bknr.hashkv::*worker-thread*))
+          do (sleep 0.01))
     (is-false (bknr.hashkv:worker-running-p))))
 
 (test submit-without-worker-signals

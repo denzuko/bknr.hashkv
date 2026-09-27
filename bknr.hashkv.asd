@@ -30,7 +30,7 @@
 (asdf:defsystem "bknr.hashkv/tests"
   :description "FiveAM unit test suite for bknr.hashkv: exercises the store API directly, one behavior per test, no persistence-across-restart or worker-lifecycle concerns."
   :license "BSD-3-Clause"
-  :depends-on ("bknr.hashkv" "bordeaux-threads" "fiveam" "uiop")
+  :depends-on ("bknr.hashkv" "bordeaux-threads" "chanl" "fiveam" "lparallel" "uiop")
   :pathname "t/"
   :components ((:file "test")))
 

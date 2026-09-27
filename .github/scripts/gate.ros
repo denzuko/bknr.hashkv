@@ -1,0 +1,139 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -- $0 "$@"
+|#
+;;;; Pre-commit gate for every Lisp source file in the repository:
+;;;;   G1  every file reads to the end with the Lisp reader (balance,
+;;;;       strings, #| |# and character escapes handled by the reader)
+;;;;   G2  no bare (IF ...) forms and no (IS (NOT ...)) assertions
+;;;;   G3  docstrings contain none of the listed voice violations
+;;;; Exits 0 when clean, 1 otherwise.
+
+(progn (ros:ensure-asdf) (require :sb-cover))
+
+(let ((root (uiop:pathname-parent-directory-pathname
+             (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname *load-pathname*)))))
+  (let ((qlot-setup (probe-file (merge-pathnames ".qlot/setup.lisp" root))))
+    (when qlot-setup (load qlot-setup)))
+  (push root asdf:*central-registry*))
+
+(ql:quickload '(:cl-ppcre :bknr.hashkv/tests :bknr.hashkv/e2e :bknr.hashkv/bdd :bknr.hashkv/docs) :silent t)
+
+(defpackage :bknr.hashkv/gate
+  (:use :cl))
+
+(in-package :bknr.hashkv/gate)
+
+(defparameter *source-globs*
+  '("*.asd" "*.ros" "src/*.lisp" "t/*.lisp" "features/step_definitions/*.lisp" ".github/scripts/*.ros")
+  "Files the gate reads, relative to the repository root.")
+
+(defparameter *voice-patterns*
+  '("\\b\\w+'(t|re|ve|ll|d|m)\\b" "\\b(it|that|there|here|what|let)'s\\b"
+    "worth (noting|doing|avoiding|knowing)" "not hypothetical" "\\bhonestly\\b"
+    "\\b(un)?verified\\b" "\\bconfirmed\\b" "let that land" "this (section|file) documents"
+    "matters here" "easy to get" "red phase" "rather than assumed" "keep in mind"
+    "\\bnot [^.;]{1,40}[,;] it is\\b" "\\bnot [^.;]{1,40} [-—] it is\\b")
+  "Case-insensitive patterns a docstring must not match.")
+
+(defvar *failures* 0 "Number of violations reported so far.")
+
+(defun report (file control &rest args)
+  "Prints one violation for FILE and counts it."
+  (incf *failures*)
+  (format t "~&~A: ~?~%" (enough-namestring file (uiop:getcwd)) control args))
+
+(defun source-files ()
+  "Returns every file matched by *SOURCE-GLOBS*."
+  (mapcan (lambda (glob) (directory (merge-pathnames glob (uiop:getcwd)))) *source-globs*))
+
+(defun open-source (file)
+  "Opens FILE for reading, positioned after the shell header line of a .ros script."
+  (let ((stream (open file)))
+    (when (string= "ros" (pathname-type file))
+      (read-line stream))
+    stream))
+
+(defun read-forms (file &key suppress)
+  "Returns every top-level form of FILE. Evaluates DEFPACKAGE and IN-PACKAGE
+forms as they are read so later symbols resolve. #. is evaluated, since the
+gate only reads this repository's own sources."
+  (let ((*package* (find-package :cl-user))
+        (*read-suppress* suppress))
+    (with-open-stream (stream (open-source file))
+      (loop for form = (read stream nil stream)
+            until (eq form stream)
+            when (and (consp form) (member (first form) '(defpackage in-package)))
+              do (eval form)
+            collect form))))
+
+(defun g1-reads (file)
+  "G1: reports FILE when the reader cannot read it to the end."
+  (handler-case (progn (read-forms file :suppress t) t)
+    (error (condition) (report file "G1 read error: ~A" condition) nil)))
+
+(defun walk (function form)
+  "Calls FUNCTION on FORM and on every cons nested inside it."
+  (when (consp form)
+    (funcall function form)
+    (loop for tail on form
+          while (consp tail)
+          do (walk function (car tail)))))
+
+(defun negated-assertion-p (form)
+  "True for (IS (NOT ...)) and (FIVEAM:IS (NOT ...))."
+  (and (string= "IS" (symbol-name* (first form)))
+       (consp (second form))
+       (eq 'not (first (second form)))))
+
+(defun symbol-name* (object)
+  "SYMBOL-NAME of OBJECT, or the empty string for non-symbols."
+  (or (and (symbolp object) (symbol-name object)) ""))
+
+(defun g2-forms (file forms)
+  "G2: reports bare IF forms and negated IS assertions in FORMS."
+  (dolist (form forms)
+    (walk (lambda (subform)
+            (when (eq 'if (first subform))
+              (report file "G2 bare IF: ~S" subform))
+            (when (negated-assertion-p subform)
+              (report file "G2 use IS-FALSE instead of ~S" subform)))
+          form)))
+
+(defun docstrings (form)
+  "Returns the docstrings found in FORM and its nested definitions."
+  (let ((found '()))
+    (walk (lambda (subform)
+            (let ((head (symbol-name* (first subform))))
+              (dolist (candidate (list (and (member head '("DEFUN" "DEFMACRO" "DEFGENERIC" "DEFVAR" "DEFPARAMETER" "DEFCONSTANT") :test #'string=)
+                                            (nth 3 subform))
+                                       (and (member head '("DEFSTRUCT" "TEST" "DEF-SUITE") :test #'string=)
+                                            (nth 2 subform))
+                                       (and (eq :documentation (first subform)) (second subform))))
+                (when (stringp candidate) (push candidate found)))))
+          form)
+    found))
+
+(defun g3-voice (file forms)
+  "G3: reports docstrings in FORMS that match *VOICE-PATTERNS*."
+  (dolist (doc (mapcan #'docstrings forms))
+    (dolist (pattern *voice-patterns*)
+      (let ((hit (cl-ppcre:scan-to-strings (cl-ppcre:create-scanner pattern :case-insensitive-mode t) doc)))
+        (when hit
+          (report file "G3 voice ~S in docstring ~S" hit (subseq doc 0 (min 60 (length doc)))))))))
+
+(defun check (file)
+  "Runs G1, then G2 and G3 when FILE is readable."
+  (when (g1-reads file)
+    (let ((forms (handler-case (read-forms file)
+                   (error (condition) (report file "G2 read error: ~A" condition) nil))))
+      (g2-forms file forms)
+      (g3-voice file forms))))
+
+(defun main (&rest argv)
+  "Checks every source file and exits 1 when any check failed. ARGV is unused."
+  (declare (ignore argv))
+  (mapc #'check (source-files))
+  (format t "~&gate: ~D violation~:P~%" *failures*)
+  (uiop:quit (min 1 *failures*)))

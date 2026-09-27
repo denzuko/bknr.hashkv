@@ -1,0 +1,65 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -- $0 "$@"
+|#
+;;;; Runs the unit, e2e and BDD suites against an instrumented build of
+;;;; bknr.hashkv, writes the sb-cover report to build/cover/, and exits 1
+;;;; when a suite fails or branch coverage of src/ is below 100%.
+
+(progn (ros:ensure-asdf) (require :sb-cover))
+
+(let ((root (uiop:pathname-parent-directory-pathname
+             (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname *load-pathname*)))))
+  (let ((qlot-setup (probe-file (merge-pathnames ".qlot/setup.lisp" root))))
+    (when qlot-setup (load qlot-setup)))
+  (push root asdf:*central-registry*))
+
+(ql:quickload '(:bknr.datastore :bknr.ttl :chanl :lparallel :ironclad :babel :cl-ppcre) :silent t)
+
+(defpackage :bknr.hashkv/cover
+  (:use :cl))
+
+(in-package :bknr.hashkv/cover)
+
+(defparameter *required-branch-percent* 100
+  "Minimum branch coverage of every file under src/.")
+
+(defparameter *suites*
+  '((:bknr.hashkv/tests "BKNR.HASHKV/TESTS" "RUN-TESTS")
+    (:bknr.hashkv/e2e "BKNR.HASHKV/E2E" "RUN-E2E")
+    (:bknr.hashkv/bdd "BKNR.HASHKV/BDD" "RUN-BDD"))
+  "System, package and runner function of each suite.")
+
+(defun load-instrumented ()
+  "Compiles bknr.hashkv with coverage recording, then loads the suites without it."
+  (proclaim '(optimize sb-cover:store-coverage-data))
+  (asdf:load-system :bknr.hashkv :force '(:bknr.hashkv))
+  (proclaim '(optimize (sb-cover:store-coverage-data 0)))
+  (ql:quickload (mapcar #'first *suites*) :silent t))
+
+(defun run-suites ()
+  "Runs every suite and returns T when all passed."
+  (notany #'null (mapcar (lambda (suite) (apply #'uiop:symbol-call (rest suite))) *suites*)))
+
+(defun branch-percentages (index)
+  "Returns (file . branch-percent) for each row of sb-cover's INDEX page."
+  (let ((rows '()))
+    (cl-ppcre:do-register-groups (file percent)
+        ("<a href='[^']*'>([^<]+)</a></td>(?:<td>[^<]*</td>){5}<td>\\s*([0-9.]+)</td>"
+         (uiop:read-file-string index))
+      (push (cons file (read-from-string percent)) rows))
+    rows))
+
+(defun main (&rest argv)
+  "Runs the coverage build. ARGV is unused."
+  (declare (ignore argv))
+  (let ((out (merge-pathnames "build/cover/" (uiop:getcwd))))
+    (load-instrumented)
+    (let ((passed (run-suites)))
+      (sb-cover:report out)
+      (let ((short (remove-if (lambda (row) (>= (cdr row) *required-branch-percent*))
+                              (branch-percentages (merge-pathnames "cover-index.html" out)))))
+        (loop for (file . percent) in short
+              do (format *error-output* "~&coverage: ~A branch ~A% < ~A%~%" file percent *required-branch-percent*))
+        (uiop:quit (cond ((and passed (null short)) 0) (t 1)))))))
