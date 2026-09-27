@@ -8,7 +8,7 @@
   :description "Content-addressable key/value store plus a persisted, TTL-aware generic queue over bknr.datastore, with chanl-based KV request serialization and lparallel batch hashing."
   :author "Dwight Spencer"
   :license "BSD-3-Clause"
-  :version "1.0.0"
+  :version "1.1.0"
   :depends-on ("bknr.datastore"
                "bknr.ttl"
                "chanl"
@@ -37,7 +37,7 @@
 (asdf:defsystem "bknr.hashkv/e2e"
   :description "FiveAM end-to-end suite for bknr.hashkv: exercises the worker lifecycle and persistence across a store close/reopen, as a real caller would."
   :license "BSD-3-Clause"
-  :depends-on ("bknr.hashkv" "fiveam" "uiop")
+  :depends-on ("bknr.hashkv" "bordeaux-threads" "fiveam" "uiop")
   :pathname "t/"
   :components ((:file "e2e")))
 

@@ -213,4 +213,4 @@
 (defun run-bdd ()
   "Runs both feature suites, all of them even after a failure, and returns T
 when every scenario passed."
-  (notany #'null (mapcar #'fiveam:run! '(bknr.hashkv-gherkin-suite bknr.hashkv-queue-gherkin-suite)))))
+  (notany #'null (mapcar #'fiveam:run! '(bknr.hashkv-gherkin-suite bknr.hashkv-queue-gherkin-suite))))

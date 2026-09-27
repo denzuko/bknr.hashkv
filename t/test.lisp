@@ -1,4 +1,6 @@
 ;;;; t/test.lisp
+;;;;
+;;;; Unit suite: one behaviour per test, called directly against the API.
 
 (defpackage :bknr.hashkv/tests
   (:use :cl :fiveam)
@@ -6,168 +8,210 @@
 
 (in-package :bknr.hashkv/tests)
 
-(def-suite bknr.hashkv-suite :description "hashkv store tests")
+(def-suite bknr.hashkv-suite :description "bknr.hashkv unit tests")
 (in-suite bknr.hashkv-suite)
 
-(defvar *test-directory* #P"/tmp/bknr.hashkv-test-store/")
-
 (defun fresh-store ()
-  "Deletes and reopens a scratch datastore, so each test starts
-isolated. Closes any store left open by a prior test that errored
-before reaching its own CLOSE-STORE, so one failure does not cascade
-into STORE-ALREADY-OPEN on every test after it."
-  (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
-    (bknr.hashkv:close-store))
-  (when (probe-file *test-directory*)
-    (uiop:delete-directory-tree *test-directory* :validate t))
-  (bknr.hashkv:open-store *test-directory*))
+  "Closes any open store and opens an empty one in a new temporary directory."
+  (bknr.hashkv:close-store)
+  (bknr.hashkv:open-store
+   (uiop:ensure-directory-pathname
+    (merge-pathnames (format nil "bknr.hashkv-test-~A" (bknr.hashkv::generate-token-id))
+                     (uiop:temporary-directory)))))
 
-;;; --- KV: content-addressed --------------------------------------------
+(defmacro with-fresh-store (&body body)
+  "Runs BODY against a fresh store and closes it afterwards, also on error."
+  `(progn (fresh-store)
+          (unwind-protect (progn ,@body)
+            (bknr.hashkv:close-store))))
+
+(defmacro with-worker (&body body)
+  "Runs BODY with the chanl worker started, and stops it afterwards."
+  `(progn (bknr.hashkv:start-worker)
+          (unwind-protect (progn ,@body)
+            (bknr.hashkv:stop-worker))))
+
+(defun backdate-claim (token-id seconds)
+  "Moves the claim time of entry TOKEN-ID SECONDS into the past."
+  (let ((entry (bknr.hashkv::entry-with-token-id token-id)))
+    (bknr.datastore:with-transaction ()
+      (setf (bknr.hashkv::entry-claimed-at entry) (- (get-universal-time) seconds)))))
+
+;;; --- Content-addressed KV ---------------------------------------------
 
 (test put-and-get-round-trip
-  (fresh-store)
-  (let ((key (bknr.hashkv:put-value "hello world")))
-    (is (string= "hello world" (bknr.hashkv:get-value key))))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (let ((key (bknr.hashkv:put-value "hello world")))
+      (is (string= "hello world" (bknr.hashkv:get-value key))))))
 
 (test put-is-idempotent-by-hash
-  (fresh-store)
-  (let ((key-a (bknr.hashkv:put-value 42))
-        (key-b (bknr.hashkv:put-value 42)))
-    (is (string= key-a key-b)))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (is (string= (bknr.hashkv:put-value 42) (bknr.hashkv:put-value 42)))))
 
 (test delete-removes-entry
-  (fresh-store)
-  (let ((key (bknr.hashkv:put-value :some-value)))
-    (is (eq t (bknr.hashkv:delete-value key)))
-    (is (null (bknr.hashkv:get-value key))))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (let ((key (bknr.hashkv:put-value :some-value)))
+      (is (eq t (bknr.hashkv:delete-value key)))
+      (is-false (bknr.hashkv:get-value key)))))
+
+(test delete-of-missing-key-returns-nil
+  (with-fresh-store
+    (is-false (bknr.hashkv:delete-value "absent"))))
 
 (test get-on-missing-key-returns-nil
-  (fresh-store)
-  (is (null (bknr.hashkv:get-value "0000000000000000000000000000000000000000000000000000000000000000")))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (is-false (bknr.hashkv:get-value (make-string 64 :initial-element #\0)))))
+
+(test hash-ignores-current-package
+  (let ((expected (bknr.hashkv::hash-value :token)))
+    (let ((*package* (find-package :bknr.hashkv)))
+      (is (string= expected (bknr.hashkv::hash-value :token))))))
+
+(test hash-ignores-print-base
+  (is (string= (bknr.hashkv::hash-value 255)
+               (let ((*print-base* 16) (*print-radix* t)) (bknr.hashkv::hash-value 255)))))
+
+(test hash-of-unreadable-value-signals
+  (signals print-not-readable (bknr.hashkv::hash-value (make-instance 'standard-object))))
+
+(test content-key-p-accepts-only-lowercase-hex-of-length-64
+  (is-true (bknr.hashkv::content-key-p (bknr.hashkv::hash-value "x")))
+  (is-false (bknr.hashkv::content-key-p (string-upcase (bknr.hashkv::hash-value "x"))))
+  (is-false (bknr.hashkv::content-key-p "abc")))
 
 (test batch-put-returns-matching-order
-  (fresh-store)
-  (let ((keys (bknr.hashkv:batch-put '(1 2 3))))
-    (is (= 3 (length keys)))
-    (is (string= (first keys) (bknr.hashkv:put-value 1))))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (let ((keys (bknr.hashkv:batch-put '(1 2 3))))
+      (is (equal keys (mapcar #'bknr.hashkv:put-value '(1 2 3)))))))
 
-(test ensure-kernel-is-safe-under-concurrent-first-call
-  ;; A real, found race condition, not a hypothetical one: without a
-  ;; lock, concurrent first calls to ENSURE-KERNEL could each see
-  ;; *WORKER-KERNEL* as NIL and each create their own kernel,
-  ;; leaking all but the one that wins the race. This launches many
-  ;; threads at once and confirms they all converge on exactly one
-  ;; kernel object, beyond only confirming no error is signaled.
-  (setf bknr.hashkv::*worker-kernel* nil)
-  (let* ((n 50)
-         (results (make-array n))
-         (threads (loop for i from 0 below n
-                         collect (let ((idx i))
-                                   (bt:make-thread
-                                    (lambda () (setf (aref results idx) (bknr.hashkv::ensure-kernel))))))))
-    (mapc #'bt:join-thread threads)
-    (is (= 1 (length (remove-duplicates (coerce results 'list)))))))
+(test batch-put-applies-ttl
+  (with-fresh-store
+    (let ((keys (bknr.hashkv:batch-put '(1 2) :expires-in-seconds -1)))
+      (is (every #'null (mapcar #'bknr.hashkv:get-value keys))))))
 
-(test submit-round-trips-through-worker
-  (fresh-store)
-  (bknr.hashkv:start-worker)
-  (let* ((key (bknr.hashkv:submit :put "queued"))
-         (value (bknr.hashkv:submit :get key)))
-    (is (string= "queued" value)))
-  (bknr.hashkv:stop-worker)
-  (bknr.hashkv:close-store))
+(test ensure-kernel-returns-one-kernel-under-concurrent-first-calls
+  (let ((bknr.hashkv::*worker-kernel* nil))
+    (let* ((results (make-array 50))
+           (threads (loop for i below 50
+                          collect (let ((i i))
+                                    (bt:make-thread
+                                     (lambda () (setf (aref results i) (bknr.hashkv::ensure-kernel))))))))
+      (mapc #'bt:join-thread threads)
+      (is (= 1 (length (remove-duplicates (coerce results 'list)))))
+      (lparallel:end-kernel :wait t))))
 
-(test start-worker-is-idempotent
-  "A second START-WORKER call used to orphan the first worker task
-permanently, since STOP-WORKER only ever signals whichever task
-*WORKER-THREAD* currently points at."
-  (fresh-store)
-  (bknr.hashkv:start-worker)
-  (let ((first-task bknr.hashkv::*worker-thread*))
-    (bknr.hashkv:start-worker)
-    (is (eq first-task bknr.hashkv::*worker-thread*)))
-  (bknr.hashkv:stop-worker)
-  (bknr.hashkv:close-store))
-
-;;; --- KV: caller-keyed ---------------------------------------------------
+;;; --- Caller-keyed KV ------------------------------------------------------
 
 (test put-keyed-uses-caller-supplied-key
-  (fresh-store)
-  (bknr.hashkv:put-keyed "session:abc" "user-42")
-  (is (string= "user-42" (bknr.hashkv:get-value "session:abc")))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (bknr.hashkv:put-keyed "session:abc" "user-42")
+    (is (string= "user-42" (bknr.hashkv:get-value "session:abc")))))
 
 (test put-keyed-overwrites-existing-value
-  (fresh-store)
-  (bknr.hashkv:put-keyed "counter:hits" 1)
-  (bknr.hashkv:put-keyed "counter:hits" 2)
-  (is (= 2 (bknr.hashkv:get-value "counter:hits")))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (bknr.hashkv:put-keyed "counter:hits" 1)
+    (bknr.hashkv:put-keyed "counter:hits" 2)
+    (is (= 2 (bknr.hashkv:get-value "counter:hits")))))
+
+(test put-keyed-rejects-content-hash-keys
+  (with-fresh-store
+    (signals bknr.hashkv:reserved-key-error
+      (bknr.hashkv:put-keyed (bknr.hashkv:put-value "genuine") "forged"))))
+
+(test put-keyed-rejects-non-string-keys
+  (with-fresh-store
+    (signals type-error (bknr.hashkv:put-keyed 42 "value"))))
 
 ;;; --- TTL ----------------------------------------------------------------
 
 (test expired-kv-entry-reads-as-absent
-  (fresh-store)
-  (let ((key (bknr.hashkv:put-keyed "temp:token" "abc" :expires-in-seconds -1)))
-    (is (null (bknr.hashkv:get-value key))))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (let ((key (bknr.hashkv:put-keyed "temp:token" "abc" :expires-in-seconds -1)))
+      (is-false (bknr.hashkv:get-value key)))))
 
 (test unexpired-kv-entry-still-readable
-  (fresh-store)
-  (let ((key (bknr.hashkv:put-keyed "temp:token" "abc" :expires-in-seconds 3600)))
-    (is (string= "abc" (bknr.hashkv:get-value key))))
-  (bknr.hashkv:close-store))
+  (with-fresh-store
+    (let ((key (bknr.hashkv:put-keyed "temp:token" "abc" :expires-in-seconds 3600)))
+      (is (string= "abc" (bknr.hashkv:get-value key))))))
+
+(test expire-key-keeps-an-entry-renewed-before-it-ran
+  (with-fresh-store
+    (bknr.hashkv:put-keyed "renewed" "v" :expires-in-seconds 3600)
+    (bknr.hashkv::expire-key "renewed")
+    (is (string= "v" (bknr.hashkv:get-value "renewed")))))
+
+(test sweep-expired-counts-removed-entries
+  (with-fresh-store
+    (bknr.hashkv:put-keyed "gone" 1 :expires-in-seconds -1)
+    (bknr.hashkv:enqueue "gone" :expires-in-seconds -1)
+    (bknr.hashkv:put-keyed "kept" 1)
+    (is (= 2 (bknr.hashkv:sweep-expired)))))
 
 ;;; --- Queue ----------------------------------------------------------------
 
-(test identical-payloads-get-distinct-entries
-  (fresh-store)
-  (let ((id-a (bknr.hashkv:enqueue "same payload"))
-        (id-b (bknr.hashkv:enqueue "same payload")))
-    (is (not (string= id-a id-b))))
-  (bknr.hashkv:close-store))
+(test token-ids-are-32-hex-digits
+  (is (= 32 (length (bknr.hashkv::generate-token-id)))))
 
-(test dequeue-claim-returns-oldest-first
-  (fresh-store)
-  (bknr.hashkv:enqueue "first")
-  (bknr.hashkv:enqueue "second")
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-1")
-    (declare (ignore id))
-    (is (string= "first" payload)))
-  (bknr.hashkv:close-store))
+(test dequeue-claim-skips-expired-entries
+  (with-fresh-store
+    (bknr.hashkv:enqueue "stale" :expires-in-seconds -1)
+    (bknr.hashkv:enqueue "live")
+    (is (equal "live" (nth-value 1 (bknr.hashkv:dequeue-claim "c1"))))))
 
-(test claimed-entry-is-not-claimable-again
-  (fresh-store)
-  (bknr.hashkv:enqueue "only entry")
-  (bknr.hashkv:dequeue-claim "claimant-1")
-  (is (null (bknr.hashkv:dequeue-claim "claimant-2")))
-  (bknr.hashkv:close-store))
+(test dequeue-claim-leaves-the-index-list-intact
+  (with-fresh-store
+    (dotimes (i 5) (bknr.hashkv:enqueue i))
+    (bknr.hashkv:dequeue-claim "c1")
+    (is (= 5 (length (bknr.hashkv::queue-entries))))))
 
-(test ack-removes-entry-from-queue
-  (fresh-store)
-  (bknr.hashkv:enqueue "to finish")
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-1")
-    (declare (ignore payload))
-    (is (eq t (bknr.hashkv:ack-claim id))))
-  (is (null (bknr.hashkv:dequeue-claim "claimant-2")))
-  (bknr.hashkv:close-store))
+(test release-of-unknown-token-returns-nil
+  (with-fresh-store
+    (is-false (bknr.hashkv:release-claim "no-such-token"))))
 
-(test release-makes-entry-claimable-again
-  (fresh-store)
-  (bknr.hashkv:enqueue "retry me")
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-1")
-    (declare (ignore payload))
-    (bknr.hashkv:release-claim id))
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-2")
-    (declare (ignore id))
-    (is (string= "retry me" payload)))
-  (bknr.hashkv:close-store))
+(test reclaim-leaves-fresh-claims-alone
+  (with-fresh-store
+    (bknr.hashkv:enqueue "busy")
+    (bknr.hashkv:dequeue-claim "c1")
+    (is (= 0 (bknr.hashkv:reclaim-stale-claims :older-than-seconds 300)))))
+
+(test reclaim-clears-stale-claims
+  (with-fresh-store
+    (let ((token (bknr.hashkv:enqueue "abandoned")))
+      (bknr.hashkv:dequeue-claim "c1")
+      (backdate-claim token 9999)
+      (is (= 1 (bknr.hashkv:reclaim-stale-claims :older-than-seconds 300)))
+      (is (string= token (bknr.hashkv:dequeue-claim "c2"))))))
+
+;;; --- Worker ---------------------------------------------------------------
+
+(test submit-round-trips-through-worker
+  (with-fresh-store
+    (with-worker
+      (is (string= "queued" (bknr.hashkv:submit :get (bknr.hashkv:submit :put "queued")))))))
+
+(test start-worker-is-idempotent
+  (with-fresh-store
+    (with-worker
+      (is (eq (bknr.hashkv:start-worker) (bknr.hashkv:start-worker))))))
+
+(test stop-worker-is-idempotent
+  (with-fresh-store
+    (bknr.hashkv:start-worker)
+    (bknr.hashkv:stop-worker)
+    (bknr.hashkv:stop-worker)
+    (is-false (bknr.hashkv:worker-running-p))))
+
+(test submit-without-worker-signals
+  (with-fresh-store
+    (signals error (bknr.hashkv:submit :get "k"))))
+
+(test submit-signals-worker-errors-in-caller-and-worker-survives
+  (with-fresh-store
+    (with-worker
+      (signals type-error (bknr.hashkv:submit :frobnicate 1))
+      (is-true (bknr.hashkv:worker-running-p))
+      (is (string= "still up" (bknr.hashkv:submit :get (bknr.hashkv:submit :put "still up")))))))
 
 (defun run-tests ()
-  "Runs the bknr.hashkv test suite and returns T if every test passed."
+  "Runs the unit suite and returns T when every test passed."
   (fiveam:run! 'bknr.hashkv-suite))
