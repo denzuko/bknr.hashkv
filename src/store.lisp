@@ -8,7 +8,7 @@
 ;;;;                reserved for PUT-VALUE.
 ;;;;
 ;;;;   QUEUE-ENTRY  Keyed by a random token id, so identical payloads
-;;;;                remain separate entries. Claimed in sequence order.
+;;;;                remain separate entries. Claimed in object id order.
 ;;;;
 ;;;; Every read that decides a write happens inside the same
 ;;;; WITH-TRANSACTION as the write. The mp-store guard serializes
@@ -22,7 +22,6 @@
 (defpackage :bknr.hashkv
   (:use :cl)
   (:export ;; store lifecycle
-           #:*store-directory*
            #:open-store
            #:close-store
            ;; KV
@@ -48,33 +47,6 @@
            #:submit))
 
 (in-package :bknr.hashkv)
-
-;;; --- State ------------------------------------------------------------
-
-(defvar *store-directory* nil
-  "Directory of the open store's snapshot and transaction log. When NIL,
-OPEN-STORE uses bknr.hashkv/ under the XDG data directory.")
-
-(defvar *worker-kernel* nil
-  "lparallel kernel used to hash BATCH-PUT values in parallel.")
-
-(defvar *worker-kernel-lock* (bt:make-lock "bknr.hashkv kernel")
-  "Serializes the first call to ENSURE-KERNEL so only one kernel is created.")
-
-(defvar *request-channel* nil
-  "chanl channel carrying KV requests to the worker task.")
-
-(defvar *worker-thread* nil
-  "The chanl task draining *REQUEST-CHANNEL*, or NIL when no worker runs.")
-
-(defvar *worker-stopped-channel* nil
-  "Channel on which the worker reports that it has left its loop.
-STOP-WORKER waits on this channel instead of joining a thread, because
-CHANL:PEXEC tasks run on pooled threads that do not exit.")
-
-(defvar *sequence-counter* 0
-  "Last issued queue sequence number. OPEN-STORE resets it to the highest
-persisted number. Incremented only inside a transaction.")
 
 ;;; --- Conditions ---------------------------------------------------------
 
@@ -103,13 +75,16 @@ match."))
   ((token-id :initarg :token-id :accessor entry-token-id
              :index-type bknr.indices:string-unique-index
              :index-reader entry-with-token-id)
-   (sequence-number :initarg :sequence-number :accessor entry-sequence-number)
+   (sequence-number :initarg :sequence-number :initform nil)
    (payload :initarg :payload :accessor entry-payload)
    (claimed-by :initarg :claimed-by :accessor entry-claimed-by :initform nil)
    (claimed-at :initarg :claimed-at :accessor entry-claimed-at :initform nil))
   (:documentation "A queued payload. TOKEN-ID is random, never derived from
 the payload. The slot is not named ID because STORE-OBJECT already uses
-that name for its integer object id."))
+that name for its integer object id. Entries are ordered by that object
+id. SEQUENCE-NUMBER is no longer written; it stays in the class because
+bknr.datastore refuses to restore a snapshot that names a slot the class
+lacks, and 1.0.0 stores carry it."))
 
 (bknr.ttl:register-ttl-class 'kv-entry)
 (bknr.ttl:register-ttl-class 'queue-entry)
@@ -125,24 +100,30 @@ that name for its integer object id."))
 must not modify it."
   (bknr.datastore:class-instances 'queue-entry))
 
-(defun bootstrap-sequence-counter ()
-  "Sets *SEQUENCE-COUNTER* to the highest persisted sequence number."
-  (setf *sequence-counter*
-        (reduce #'max (queue-entries) :key #'entry-sequence-number :initial-value 0)))
+(defclass hashkv-store (bknr.datastore:mp-store)
+  ((worker :initform nil :accessor store-worker
+           :documentation "The WORKER started for this store, or NIL."))
+  (:documentation "The store OPEN-STORE returns. Holds the KV worker so
+START-WORKER, SUBMIT and STOP-WORKER need no argument and the library
+keeps no state of its own."))
 
-(defun open-store (&optional (directory (or *store-directory* (default-store-directory))))
+(defun open-store-p ()
+  "True when a store is open."
+  (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store* t))
+
+(defun open-store (&optional (directory (default-store-directory)))
   "Opens, or creates, the store at DIRECTORY and returns it. Call once
 before any KV or queue operation."
-  (setf *store-directory* (uiop:ensure-directory-pathname directory))
-  (ensure-directories-exist *store-directory*)
-  (prog1 (make-instance 'bknr.datastore:mp-store
-                        :directory *store-directory*
-                        :subsystems (list (make-instance 'bknr.datastore:store-object-subsystem)))
-    (bootstrap-sequence-counter)))
+  (let ((directory (ensure-directories-exist (uiop:ensure-directory-pathname directory))))
+    (make-instance 'hashkv-store
+                   :directory directory
+                   :subsystems (list (make-instance 'bknr.datastore:store-object-subsystem)))))
 
 (defun close-store ()
-  "Closes the open store. Does nothing when no store is open."
-  (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
+  "Stops the open store's worker, if any, and closes the store. Does
+nothing when no store is open."
+  (when (open-store-p)
+    (stop-worker)
     (bknr.datastore:close-store)))
 
 ;;; --- Keys and TTL ---------------------------------------------------------
@@ -230,20 +211,23 @@ when none existed."
     (bknr.datastore:delete-object entry)
     t))
 
-(defun ensure-kernel ()
-  "Returns the lparallel kernel for batch hashing, creating it on first use."
-  (bt:with-lock-held (*worker-kernel-lock*)
-    (or *worker-kernel*
-        (setf *worker-kernel* (lparallel:make-kernel 4 :name "bknr.hashkv")))))
+(defun call-with-kernel (function)
+  "Calls FUNCTION with an lparallel kernel. Uses the caller's
+LPARALLEL:*KERNEL* when one is bound; otherwise creates a four-worker
+kernel for this call and ends it before returning."
+  (cond (lparallel:*kernel* (funcall function))
+        (t (let ((lparallel:*kernel* (lparallel:make-kernel 4 :name "bknr.hashkv batch")))
+             (unwind-protect (funcall function)
+               (lparallel:end-kernel :wait t))))))
 
 (defun batch-put (values &key expires-in-seconds)
   "Hashes VALUES in parallel, then stores each one as PUT-VALUE would, in
 order, one transaction per value. Returns the keys in the order of
-VALUES. The batch is not atomic: an error leaves earlier values stored."
-  (let* ((lparallel:*kernel* (ensure-kernel))
-         (keys (lparallel:pmap 'list #'hash-value values)))
-    (mapcar (lambda (key value) (store-entry key value expires-in-seconds))
-            keys values)))
+VALUES. The batch is not atomic: an error leaves earlier values stored.
+Bind LPARALLEL:*KERNEL* to reuse a kernel across calls."
+  (mapcar (lambda (key value) (store-entry key value expires-in-seconds))
+          (call-with-kernel (lambda () (lparallel:pmap 'list #'hash-value values)))
+          values))
 
 ;;; --- Queue operations -------------------------------------------------------
 
@@ -263,7 +247,6 @@ SWEEP-EXPIRED."
     (bknr.datastore:with-transaction ()
       (make-instance 'queue-entry
                      :token-id token-id
-                     :sequence-number (incf *sequence-counter*)
                      :payload payload
                      :expires-at expires-at))
     token-id))
@@ -273,15 +256,16 @@ SWEEP-EXPIRED."
   (not (or (entry-claimed-by entry)
            (bknr.ttl:entry-expired-p entry now))))
 
-(defun oldest-claimable (now)
-  "Returns the claimable entry with the lowest sequence number, or NIL.
-One pass, no sorting, and the index's own list is left untouched."
+(defun oldest-claimable (entries now)
+  "Returns the entry of ENTRIES that is claimable at NOW and has the lowest
+object id, or NIL. Object ids are allocated in transaction order, so the
+lowest id is the earliest enqueue. One pass; ENTRIES is not modified."
   (reduce (lambda (best entry)
             (cond ((not (claimable-p entry now)) best)
                   ((null best) entry)
-                  ((< (entry-sequence-number entry) (entry-sequence-number best)) entry)
+                  ((< (bknr.datastore:store-object-id entry) (bknr.datastore:store-object-id best)) entry)
                   (t best)))
-          (queue-entries)
+          entries
           :initial-value nil))
 
 (defun dequeue-claim (claimant-id)
@@ -291,7 +275,7 @@ claimable. The search and the claim run in one transaction."
   (destructuring-bind (&optional token-id . payload)
       (bknr.datastore:with-transaction ()
         (let* ((now (get-universal-time))
-               (entry (oldest-claimable now)))
+               (entry (oldest-claimable (queue-entries) now)))
           (when entry
             (setf (entry-claimed-by entry) claimant-id
                   (entry-claimed-at entry) now)
@@ -361,43 +345,73 @@ the operation signals. The worker never unwinds on a caller's error."
   (handler-case (cons :ok (apply-op (request-op request) (request-arg request)))
     (error (condition) (cons :error condition))))
 
-(defun worker-running-p ()
-  "True when a worker task exists and has not terminated."
-  (and *worker-thread*
-       (not (eq :terminated (chanl:task-status *worker-thread*)))))
+(defstruct (worker (:constructor %make-worker))
+  "A running or stopped KV worker. REQUESTS carries requests to the task,
+STOPPED receives the task's exit notice, STATE is :RUNNING or :STOPPED,
+and LOCK serializes changes to STATE. CHANL:PEXEC tasks run on pooled
+threads that do not exit, so stopping waits on STOPPED rather than
+joining a thread."
+  (requests (make-instance 'chanl:channel))
+  (stopped (make-instance 'chanl:channel))
+  (state :running)
+  (lock (bt:make-lock "bknr.hashkv worker")))
 
-(defun worker-loop ()
-  "Answers requests from *REQUEST-CHANNEL* until it receives NIL."
-  (loop for request = (chanl:recv *request-channel*)
+(defun worker-loop (worker)
+  "Answers requests from WORKER's channel until it receives NIL."
+  (loop for request = (chanl:recv (worker-requests worker))
         while request
         do (chanl:send (request-reply request) (dispatch-request request)))
-  (chanl:send *worker-stopped-channel* t))
+  (chanl:send (worker-stopped worker) t))
+
+(defun current-store ()
+  "Returns the open store when OPEN-STORE created it, otherwise NIL."
+  (and (open-store-p)
+       (typep bknr.datastore:*store* 'hashkv-store)
+       bknr.datastore:*store*))
+
+(defun current-worker ()
+  "Returns the worker attached to the open store, or NIL."
+  (let ((store (current-store)))
+    (and store (store-worker store))))
+
+(defun worker-running-p (&optional (worker (current-worker)))
+  "True when WORKER, by default the open store's worker, exists and has
+not been stopped."
+  (and worker (eq :running (worker-state worker))))
 
 (defun start-worker ()
-  "Starts the worker task and returns it. When a worker is already
-running, returns that worker instead of starting a second one."
-  (unless (worker-running-p)
-    (setf *request-channel* (make-instance 'chanl:channel)
-          *worker-stopped-channel* (make-instance 'chanl:channel)
-          *worker-thread* (chanl:pexec (:name "bknr.hashkv-worker") (worker-loop))))
-  *worker-thread*)
+  "Starts a KV worker for the open store and returns it. When the store's
+worker is already running, returns that worker instead of starting a
+second one. Signals an error when no store is open."
+  (let ((store (current-store)))
+    (unless store
+      (error "bknr.hashkv has no open store; call OPEN-STORE first."))
+    (unless (worker-running-p (store-worker store))
+      (let ((worker (%make-worker)))
+        (chanl:pexec (:name "bknr.hashkv-worker") (worker-loop worker))
+        (setf (store-worker store) worker)))
+    (store-worker store)))
 
-(defun stop-worker ()
-  "Stops the worker and waits until it has left its loop. Does nothing
-when no worker is running."
-  (when (worker-running-p)
-    (chanl:send *request-channel* nil)
-    (chanl:recv *worker-stopped-channel*))
-  (setf *worker-thread* nil))
+(defun stop-worker (&optional (worker (current-worker)))
+  "Stops WORKER, by default the open store's worker, and waits until its
+task has left the loop. Does nothing when there is no worker or it is
+already stopped, from any thread."
+  (when worker
+    (bt:with-lock-held ((worker-lock worker))
+      (when (worker-running-p worker)
+        (setf (worker-state worker) :stopped)
+        (chanl:send (worker-requests worker) nil)
+        (chanl:recv (worker-stopped worker))))))
 
-(defun submit (op arg)
-  "Sends OP (:PUT, :GET or :DELETE) with ARG to the worker, waits, and
-returns the result. A condition signalled by the operation is signalled
-again in the caller's thread. Signals an error when no worker is running."
-  (unless (worker-running-p)
+(defun submit (op arg &optional (worker (current-worker)))
+  "Sends OP (:PUT, :GET or :DELETE) with ARG to WORKER, by default the open
+store's worker, waits, and returns the result. A condition signalled by
+the operation is signalled again in the caller's thread. Signals an
+error when the worker is missing or stopped."
+  (unless (worker-running-p worker)
     (error "bknr.hashkv worker is not running; call START-WORKER first."))
   (let ((reply (make-instance 'chanl:channel)))
-    (chanl:send *request-channel* (make-request :op op :arg arg :reply reply))
+    (chanl:send (worker-requests worker) (make-request :op op :arg arg :reply reply))
     (destructuring-bind (status . result) (chanl:recv reply)
       (when (eq status :error)
         (error result))

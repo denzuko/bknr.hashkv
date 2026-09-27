@@ -26,7 +26,7 @@
             (bknr.hashkv:close-store))))
 
 (defmacro with-worker (&body body)
-  "Runs BODY with the chanl worker started, and stops it afterwards."
+  "Runs BODY with the open store's worker started, and stops it afterwards."
   `(progn (bknr.hashkv:start-worker)
           (unwind-protect (progn ,@body)
             (bknr.hashkv:stop-worker))))
@@ -89,16 +89,20 @@
     (let ((keys (bknr.hashkv:batch-put '(1 2) :expires-in-seconds -1)))
       (is (every #'null (mapcar #'bknr.hashkv:get-value keys))))))
 
-(test ensure-kernel-returns-one-kernel-under-concurrent-first-calls
-  (let ((bknr.hashkv::*worker-kernel* nil))
-    (let* ((results (make-array 50))
-           (threads (loop for i below 50
-                          collect (let ((i i))
-                                    (bt:make-thread
-                                     (lambda () (setf (aref results i) (bknr.hashkv::ensure-kernel))))))))
-      (mapc #'bt:join-thread threads)
-      (is (= 1 (length (remove-duplicates (coerce results 'list)))))
+(test batch-put-uses-the-callers-kernel
+  (let ((lparallel:*kernel* (lparallel:make-kernel 2 :name "caller")))
+    (unwind-protect
+         (let ((seen (bknr.hashkv::call-with-kernel (lambda () lparallel:*kernel*))))
+           (is (eq lparallel:*kernel* seen)))
       (lparallel:end-kernel :wait t))))
+
+(test batch-put-ends-the-kernel-it-creates
+  (let ((lparallel:*kernel* nil))
+    (let ((created (bknr.hashkv::call-with-kernel (lambda () lparallel:*kernel*))))
+      (is-true created)
+      (is-false lparallel:*kernel*)
+      (let ((lparallel:*kernel* created))
+        (signals error (lparallel:pmap 'list #'identity '(1)))))))
 
 ;;; --- Caller-keyed KV ------------------------------------------------------
 
@@ -168,13 +172,12 @@
     (bknr.hashkv:dequeue-claim "c1")
     (is (= 5 (length (bknr.hashkv::queue-entries))))))
 
-(test dequeue-claim-orders-by-sequence-number-not-index-order
+(test oldest-claimable-orders-by-object-id-not-list-order
   (with-fresh-store
-    (bknr.hashkv:enqueue "later")
-    (let ((token (bknr.hashkv:enqueue "earlier")))
-      (bknr.datastore:with-transaction ()
-        (setf (bknr.hashkv::entry-sequence-number (bknr.hashkv::entry-with-token-id token)) 0))
-      (is (equal "earlier" (nth-value 1 (bknr.hashkv:dequeue-claim "c1")))))))
+    (bknr.hashkv:enqueue "first")
+    (bknr.hashkv:enqueue "second")
+    (let ((oldest (bknr.hashkv::oldest-claimable (reverse (bknr.hashkv::queue-entries)) (get-universal-time))))
+      (is (equal "first" (bknr.hashkv::entry-payload oldest))))))
 
 (test release-of-unknown-token-returns-nil
   (with-fresh-store
@@ -206,6 +209,17 @@
     (with-worker
       (is (eq (bknr.hashkv:start-worker) (bknr.hashkv:start-worker))))))
 
+(test start-worker-without-a-store-signals
+  (bknr.hashkv:close-store)
+  (signals error (bknr.hashkv:start-worker)))
+
+(test submit-accepts-an-explicit-worker
+  (with-fresh-store
+    (let ((worker (bknr.hashkv:start-worker)))
+      (unwind-protect
+           (is (string= "a" (bknr.hashkv:submit :get (bknr.hashkv:submit :put "a" worker) worker)))
+        (bknr.hashkv:stop-worker worker)))))
+
 (test stop-worker-is-idempotent
   (with-fresh-store
     (bknr.hashkv:start-worker)
@@ -213,14 +227,31 @@
     (bknr.hashkv:stop-worker)
     (is-false (bknr.hashkv:worker-running-p))))
 
-(test worker-running-p-is-false-for-a-terminated-task
-  (let ((bknr.hashkv::*worker-thread* (chanl:pexec () nil)))
-    (loop until (eq :terminated (chanl:task-status bknr.hashkv::*worker-thread*))
-          do (sleep 0.01))
-    (is-false (bknr.hashkv:worker-running-p))))
-
-(test submit-without-worker-signals
+(test stop-worker-without-a-worker-does-nothing
   (with-fresh-store
+    (is-false (bknr.hashkv:stop-worker))))
+
+(test concurrent-stop-worker-calls-all-return
+  (with-fresh-store
+    (let* ((worker (bknr.hashkv:start-worker))
+           (threads (loop repeat 8 collect (bt:make-thread (lambda () (bknr.hashkv:stop-worker worker))))))
+      (mapc #'bt:join-thread threads)
+      (is-false (bknr.hashkv:worker-running-p worker)))))
+
+(test close-store-stops-the-worker
+  (fresh-store)
+  (let ((worker (bknr.hashkv:start-worker)))
+    (bknr.hashkv:close-store)
+    (is-false (bknr.hashkv:worker-running-p worker))))
+
+(test worker-running-p-without-a-store-is-false
+  (bknr.hashkv:close-store)
+  (is-false (bknr.hashkv:worker-running-p)))
+
+(test submit-to-a-stopped-worker-signals
+  (with-fresh-store
+    (bknr.hashkv:start-worker)
+    (bknr.hashkv:stop-worker)
     (signals error (bknr.hashkv:submit :get "k"))))
 
 (test submit-signals-worker-errors-in-caller-and-worker-survives

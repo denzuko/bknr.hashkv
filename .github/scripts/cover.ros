@@ -22,25 +22,23 @@ exec ros -- $0 "$@"
 
 (in-package :bknr.hashkv/cover)
 
-(defparameter *required-branch-percent* 100
-  "Minimum branch coverage of every file under src/.")
-
-(defparameter *suites*
+(defun suites ()
+  "Returns the system, package and runner function of each suite."
   '((:bknr.hashkv/tests "BKNR.HASHKV/TESTS" "RUN-TESTS")
     (:bknr.hashkv/e2e "BKNR.HASHKV/E2E" "RUN-E2E")
-    (:bknr.hashkv/bdd "BKNR.HASHKV/BDD" "RUN-BDD"))
-  "System, package and runner function of each suite.")
+    (:bknr.hashkv/bdd "BKNR.HASHKV/BDD" "RUN-BDD")))
 
-(defun load-instrumented ()
-  "Compiles bknr.hashkv with coverage recording, then loads the suites without it."
+(defun load-instrumented (suites)
+  "Compiles bknr.hashkv with coverage recording, then loads SUITES without it."
   (proclaim '(optimize sb-cover:store-coverage-data))
   (asdf:load-system :bknr.hashkv :force '(:bknr.hashkv))
   (proclaim '(optimize (sb-cover:store-coverage-data 0)))
-  (ql:quickload (mapcar #'first *suites*) :silent t))
+  (ql:quickload (mapcar #'first suites) :silent t))
 
-(defun run-suites ()
-  "Runs every suite and returns T when all passed."
-  (notany #'null (mapcar (lambda (suite) (apply #'uiop:symbol-call (rest suite))) *suites*)))
+(defun run-suites (suites)
+  "Runs every suite in SUITES, all of them even after a failure, and returns
+T when all passed."
+  (notany #'null (mapcar (lambda (suite) (apply #'uiop:symbol-call (rest suite))) suites)))
 
 (defun branch-percentages (index)
   "Returns (file . branch-percent) for each row of sb-cover's INDEX page."
@@ -51,15 +49,21 @@ exec ros -- $0 "$@"
       (push (cons file (read-from-string percent)) rows))
     rows))
 
-(defun main (&rest argv)
-  "Runs the coverage build. ARGV is unused."
+(defun files-below (index required)
+  "Returns the (file . percent) rows of INDEX below REQUIRED branch percent."
+  (remove-if (lambda (row) (>= (cdr row) required)) (branch-percentages index)))
+
+(defun main (&optional (required "100") &rest argv)
+  "Runs the coverage build and exits 1 when a suite fails or any file is
+below REQUIRED percent branch coverage (default 100). ARGV is unused."
   (declare (ignore argv))
-  (let ((out (merge-pathnames "build/cover/" (uiop:getcwd))))
-    (load-instrumented)
-    (let ((passed (run-suites)))
+  (let ((out (merge-pathnames "build/cover/" (uiop:getcwd)))
+        (required (parse-integer required))
+        (suites (suites)))
+    (load-instrumented suites)
+    (let ((passed (run-suites suites)))
       (sb-cover:report out)
-      (let ((short (remove-if (lambda (row) (>= (cdr row) *required-branch-percent*))
-                              (branch-percentages (merge-pathnames "cover-index.html" out)))))
+      (let ((short (files-below (merge-pathnames "cover-index.html" out) required)))
         (loop for (file . percent) in short
-              do (format *error-output* "~&coverage: ~A branch ~A% < ~A%~%" file percent *required-branch-percent*))
+              do (format *error-output* "~&coverage: ~A branch ~A% < ~A%~%" file percent required))
         (uiop:quit (cond ((and passed (null short)) 0) (t 1)))))))

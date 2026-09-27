@@ -14,20 +14,20 @@ exec ros -- $0 "$@"
     (when qlot-setup (load qlot-setup)))
   (push root asdf:*central-registry*))
 
-(defparameter *subcommands*
+(defun subcommands ()
+  "Returns the name, system, package and function of each subcommand."
   '(("test" :bknr.hashkv/tests "BKNR.HASHKV/TESTS" "RUN-TESTS")
     ("e2e"  :bknr.hashkv/e2e   "BKNR.HASHKV/E2E"   "RUN-E2E")
     ("bdd"  :bknr.hashkv/bdd   "BKNR.HASHKV/BDD"   "RUN-BDD")
-    ("docs" :bknr.hashkv/docs  "BKNR.HASHKV/DOCS"  "GENERATE"))
-  "Subcommand name, system, package and function of each subcommand.")
+    ("docs" :bknr.hashkv/docs  "BKNR.HASHKV/DOCS"  "GENERATE")))
 
 (defun main (&optional command &rest argv)
   "Loads the system named by COMMAND, calls its function, and exits 0 when
 the function returns true. Prints usage and exits 2 for an unknown COMMAND."
   (declare (ignore argv))
-  (let ((entry (assoc command *subcommands* :test #'equal)))
+  (let ((entry (assoc command (subcommands) :test #'equal)))
     (unless entry
-      (format *error-output* "usage: bknr.hashkv.ros {~{~A~^|~}}~%" (mapcar #'first *subcommands*))
+      (format *error-output* "usage: bknr.hashkv.ros {~{~A~^|~}}~%" (mapcar #'first (subcommands)))
       (uiop:quit 2))
     (destructuring-bind (system package function) (rest entry)
       (ql:quickload system :silent t)

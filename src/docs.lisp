@@ -14,7 +14,6 @@
 (defsection @bknr.hashkv-manual (:title "bknr.hashkv")
   "A content-addressed key/value store and a persisted queue over
 bknr.datastore. Both entry types expire through bknr.ttl."
-  (bknr.hashkv:*store-directory* variable)
   (bknr.hashkv:open-store function)
   (bknr.hashkv:close-store function)
   (bknr.hashkv:put-value function)
