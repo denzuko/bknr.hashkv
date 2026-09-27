@@ -18,6 +18,26 @@
   token previous-token claimed-token claimed-payload ack-result
   seeded-state queued-tokens claimed-tokens)
 
+(defclass effect ()
+  ((name :initarg :name :reader effect-name)
+   (damage :initarg :damage :reader effect-damage))
+  (:documentation "A plain CLOS class, not a persistent class, standing in
+for a game object such as a spell effect."))
+
+(defstruct struct-effect
+  "A structure standing in for a game object."
+  damage)
+
+(defun make-effect (name damage)
+  "Returns an EFFECT named NAME with DAMAGE, given as a digit string."
+  (make-instance 'effect :name name :damage (parse-integer damage)))
+
+(defun effect-is-p (object name damage)
+  "True when OBJECT is an EFFECT named NAME with DAMAGE, given as a digit string."
+  (and (typep object 'effect)
+       (equal name (effect-name object))
+       (= (parse-integer damage) (effect-damage object))))
+
 (defun scratch-directory ()
   "Returns a new, unique directory pathname under the system temporary directory."
   (uiop:ensure-directory-pathname
@@ -147,6 +167,48 @@ every token id claimed."
     (Then! "^every put should have returned the same key$" ()
       (is (= 1 (length (remove-duplicates (world-thread-keys world) :test #'string=)))))
 
+    (When! "^I put an effect named \"([^\"]*)\" with damage (\\d+) into the store$" (name damage)
+      (put (make-effect name damage)))
+
+    (When! "^I put an effect named \"([^\"]*)\" with damage (\\d+) into the store again$" (name damage)
+      (put (make-effect name damage)))
+
+    (Then! "^getting that key should return an effect named \"([^\"]*)\" with damage (\\d+)$" (name damage)
+      (is-true (effect-is-p (bknr.hashkv:get-value (world-key world)) name damage)))
+
+    (When! "^I put a struct effect with damage (\\d+) under the key \"([^\"]*)\"$" (damage key)
+      (bknr.hashkv:put-keyed key (make-struct-effect :damage (parse-integer damage))))
+
+    (Then! "^getting \"([^\"]*)\" should return a struct effect with damage (\\d+)$" (key damage)
+      (let ((value (bknr.hashkv:get-value key)))
+        (is (typep value 'struct-effect))
+        (is (eql (parse-integer damage) (struct-effect-damage value)))))
+
+    (When! "^I put the list 1 2 3 into the store and then change its last element to 99$" ()
+      (let ((list (list 1 2 3)))
+        (put list)
+        (setf (third list) 99)))
+
+    (When! "^I put the list 1 2 3 into the store$" ()
+      (put (list 1 2 3)))
+
+    (When! "^I change the last element of the list read from the store to 99$" ()
+      (setf (third (bknr.hashkv:get-value (world-key world))) 99))
+
+    (Then! "^getting that key should return the list 1 2 3$" ()
+      (is (equal '(1 2 3) (bknr.hashkv:get-value (world-key world)))))
+
+    (When! "^I put a function into the store$" ()
+      (setf (world-signalled world) (signalled-by (lambda () (bknr.hashkv:put-value #'car)))))
+
+    (When! "^I put a circular list into the store$" ()
+      (let ((list (list 1 2 3)))
+        (setf (cdr (last list)) list)
+        (setf (world-signalled world) (signalled-by (lambda () (bknr.hashkv:put-value list))))))
+
+    (Then! "^the put should signal an unstorable value error$" ()
+      (is (typep (world-signalled world) 'bknr.hashkv:unstorable-value-error)))
+
     ;; --- Queue
 
     (When! "^I queue \"([^\"]*)\" onto the queue$" (payload)
@@ -165,6 +227,13 @@ every token id claimed."
     (When! "^I queue (\\d+) entries onto the queue$" (count)
       (setf (world-queued-tokens world)
             (loop for i below (parse-integer count) collect (bknr.hashkv:enqueue i))))
+
+    (When! "^I queue an effect named \"([^\"]*)\" with damage (\\d+) onto the queue$" (name damage)
+      (queue (make-effect name damage)))
+
+    (Then! "^a claimant claiming the next entry should find an effect named \"([^\"]*)\" with damage (\\d+)$" (name damage)
+      (claim "claimant-3")
+      (is-true (effect-is-p (world-claimed-payload world) name damage)))
 
     (When! "^(\\d+) claimants drain the queue at once$" (count)
       (setf (world-claimed-tokens world) (drain (parse-integer count))))

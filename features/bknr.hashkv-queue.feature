@@ -60,3 +60,8 @@ Feature: Persisted generic queue
     When I queue "before restart" onto the queue
     And the store is closed and reopened
     Then a claimant claiming the next entry should find "before restart"
+
+  Scenario: A CLOS payload is claimed with its slots after a restart
+    When I queue an effect named "poison" with damage 2 onto the queue
+    And the store is closed and reopened
+    Then a claimant claiming the next entry should find an effect named "poison" with damage 2

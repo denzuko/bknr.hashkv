@@ -63,3 +63,38 @@ Feature: Content-addressable key/value storage
     When I put "durable" into the store
     And the store is closed and reopened
     Then getting that key should return "durable"
+
+  Scenario: A CLOS instance is stored and read back with its slots
+    When I put an effect named "fireball" with damage 12 into the store
+    Then getting that key should return an effect named "fireball" with damage 12
+
+  Scenario: A struct is stored under a caller-supplied key
+    When I put a struct effect with damage 7 under the key "fx:1"
+    Then getting "fx:1" should return a struct effect with damage 7
+
+  Scenario: A CLOS instance survives a store restart
+    When I put an effect named "frost" with damage 3 into the store
+    And the store is closed and reopened
+    Then getting that key should return an effect named "frost" with damage 3
+
+  Scenario: Equal CLOS instances share one key
+    When I put an effect named "heal" with damage 0 into the store
+    And I put an effect named "heal" with damage 0 into the store again
+    Then both puts should return the same key
+
+  Scenario: Changing a value after storing it does not change the stored value
+    When I put the list 1 2 3 into the store and then change its last element to 99
+    Then getting that key should return the list 1 2 3
+
+  Scenario: Changing a value read from the store does not change the stored value
+    When I put the list 1 2 3 into the store
+    And I change the last element of the list read from the store to 99
+    Then getting that key should return the list 1 2 3
+
+  Scenario: A function is rejected as a value
+    When I put a function into the store
+    Then the put should signal an unstorable value error
+
+  Scenario: A value that contains itself is rejected
+    When I put a circular list into the store
+    Then the put should signal an unstorable value error
