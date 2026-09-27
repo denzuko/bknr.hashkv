@@ -5,6 +5,11 @@
 ;;;; is evaluated in an image that has loaded this system. Edit this
 ;;;; file, not the generated YAML.
 
+;;;; The setup-lisp cache is off. It saves .qlot/ but not
+;;;; ~/.cache/qlot/sources/, where qlot keeps git dependencies, so a
+;;;; restored cache leaves bknr.ttl, sunny-side and bknr-datastore as
+;;;; dangling symlinks and skips the install that would repair them.
+
 (defpackage :bknr.hashkv/ci
   (:use :cl)
   (:import-from #:40ants-ci/workflow #:defworkflow)
@@ -16,7 +21,7 @@
 (defworkflow ci
   :on-push-to "develop"
   :on-pull-request t
-  :cache t
+  :cache nil
   :jobs ((40ants-ci/jobs/lisp-job:lisp-job
           :name "gate"
           :asdf-system "bknr.hashkv"
