@@ -27,21 +27,21 @@
   :components ((:file "docs")))
 
 (asdf:defsystem "bknr.hashkv/tests"
-  :description "FiveAM unit test suite for bknr.hashkv: exercises the store API directly, one behavior per test, no persistence-across-restart or worker-lifecycle concerns."
+  :description "FiveAM unit tests for bknr.hashkv, one behaviour per test."
   :license "BSD-3-Clause"
   :depends-on ("bknr.hashkv" "bordeaux-threads" "chanl" "fiveam" "lparallel" "uiop")
   :pathname "t/"
   :components ((:file "test")))
 
 (asdf:defsystem "bknr.hashkv/e2e"
-  :description "FiveAM end-to-end suite for bknr.hashkv: exercises the worker lifecycle and persistence across a store close/reopen, as a real caller would."
+  :description "FiveAM end-to-end tests: the worker, and data across a store close and reopen."
   :license "BSD-3-Clause"
   :depends-on ("bknr.hashkv" "bordeaux-threads" "fiveam" "uiop")
   :pathname "t/"
   :components ((:file "e2e")))
 
 (asdf:defsystem "bknr.hashkv/bdd"
-  :description "Step definitions for bknr.hashkv's Gherkin feature, running as ordinary FiveAM tests via sunny-side (denzuko/sunny-side), a standalone Gherkin-over-FiveAM engine. No Ruby, no wire protocol, no subprocess."
+  :description "Gherkin features for bknr.hashkv, run as FiveAM tests through sunny-side."
   :license "BSD-3-Clause"
   :depends-on ("bknr.hashkv" "sunny-side" "fiveam" "bordeaux-threads" "uiop")
   :pathname "features/step_definitions/"

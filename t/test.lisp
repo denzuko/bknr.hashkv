@@ -20,7 +20,7 @@
                      (uiop:temporary-directory)))))
 
 (defmacro with-fresh-store (&body body)
-  "Runs BODY against a fresh store and closes it afterwards, also on error."
+  "Runs BODY against a fresh store and closes it afterwards, even when BODY signals."
   `(progn (fresh-store)
           (unwind-protect (progn ,@body)
             (bknr.hashkv:close-store))))

@@ -13,14 +13,14 @@
 (in-suite bknr.hashkv-e2e-suite)
 
 (defun scratch-directory ()
-  "Returns a new, unique directory pathname under the system temporary directory."
+  "Returns an unused directory under the system temporary directory."
   (uiop:ensure-directory-pathname
    (merge-pathnames (format nil "bknr.hashkv-e2e-~A" (bknr.hashkv::generate-token-id))
                     (uiop:temporary-directory))))
 
 (defmacro with-e2e-store ((directory) &body body)
   "Opens an empty store in a new directory bound to DIRECTORY, runs BODY,
-and closes whichever store is open afterwards, also on error."
+and closes whichever store is open afterwards, even when BODY signals."
   `(let ((,directory (scratch-directory)))
      (declare (ignorable ,directory))
      (bknr.hashkv:close-store)

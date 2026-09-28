@@ -14,11 +14,11 @@
 ;;;; read back through VALUE-FROM-FORM (src/value.lisp).
 ;;;;
 ;;;; Every read that decides a write happens inside the same
-;;;; WITH-TRANSACTION as the write. The mp-store guard serializes
+;;;; WITH-TRANSACTION as the write. The mp-store guard serialises
 ;;;; transactions, so the check and the write cannot interleave with
 ;;;; another thread.
 ;;;;
-;;;; The chanl worker (START-WORKER, SUBMIT) serializes KV requests
+;;;; The chanl worker (START-WORKER, SUBMIT) serialises KV requests
 ;;;; within one Lisp image. It does not read or write the persisted
 ;;;; queue.
 
@@ -350,7 +350,7 @@ the operation signals. The worker never unwinds on a caller's error."
 (defstruct (worker (:constructor %make-worker))
   "A running or stopped KV worker. REQUESTS carries requests to the task,
 STOPPED receives the task's exit notice, STATE is :RUNNING or :STOPPED,
-and LOCK serializes changes to STATE. CHANL:PEXEC tasks run on pooled
+and LOCK serialises changes to STATE. CHANL:PEXEC tasks run on pooled
 threads that do not exit, so stopping waits on STOPPED rather than
 joining a thread."
   (requests (make-instance 'chanl:channel))
@@ -396,8 +396,8 @@ second one. Signals an error when no store is open."
 
 (defun stop-worker (&optional (worker (current-worker)))
   "Stops WORKER, by default the open store's worker, and waits until its
-task has left the loop. Does nothing when there is no worker or it is
-already stopped, from any thread."
+task has left the loop. Safe to call from any thread; does nothing when
+there is no worker or it is already stopped."
   (when worker
     (bt:with-lock-held ((worker-lock worker))
       (when (worker-running-p worker)

@@ -43,14 +43,14 @@ for a game object such as a spell effect."))
        (= (parse-integer damage) (effect-damage object))))
 
 (defun scratch-directory ()
-  "Returns a new, unique directory pathname under the system temporary directory."
+  "Returns an unused directory under the system temporary directory."
   (uiop:ensure-directory-pathname
    (merge-pathnames (format nil "bknr.hashkv-bdd-~A" (bknr.hashkv::generate-token-id))
                     (uiop:temporary-directory))))
 
-(defun signalled-by (thunk)
-  "Calls THUNK and returns the error it signals, or NIL."
-  (handler-case (progn (funcall thunk) nil)
+(defun signalled-by (function)
+  "Calls FUNCTION and returns the error it signals, or NIL."
+  (handler-case (progn (funcall function) nil)
     (error (condition) condition)))
 
 (defun run-threads (count function)
@@ -302,6 +302,6 @@ every token id claimed."
   :suite bknr.hashkv-queue-gherkin-suite)
 
 (defun run-bdd ()
-  "Runs both feature suites, all of them even after a failure, and returns T
+  "Runs both feature suites, continuing past a failure, and returns T
 when every scenario passed."
   (notany #'null (mapcar #'fiveam:run! '(bknr.hashkv-gherkin-suite bknr.hashkv-queue-gherkin-suite))))
