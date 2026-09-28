@@ -10,3 +10,7 @@
  (:class qlot/source/git:source-git
   :initargs (:remote-url "https://github.com/denzuko/sunny-side.git" :branch "develop")
   :version "git-591acba89f01db71acbcbf5de671e5d94d7c4356"))
+("bknr-datastore" .
+ (:class qlot/source/git:source-git
+  :initargs (:remote-url "https://github.com/denzuko/bknr-datastore.git" :branch "develop")
+  :version "git-687c4f56e6b9f106f037d2eb6f1146821e694838"))

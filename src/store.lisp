@@ -1,88 +1,40 @@
 ;;;; src/store.lisp
 ;;;;
-;;;; Two distinct persisted structures over the same bknr.datastore:
+;;;; Two persisted structures share one bknr.datastore store.
 ;;;;
-;;;;   KV-ENTRY    : content-addressed by default (PUT-VALUE hashes
-;;;;                 the payload; identical values dedupe to one key),
-;;;;                 or explicitly keyed (PUT-KEYED) for named slots
-;;;;                 like sessions or counters. Both support TTL.
+;;;;   KV-ENTRY     Keyed by the SHA-256 of the value's stored form
+;;;;                (PUT-VALUE) or by a caller-supplied name
+;;;;                (PUT-KEYED). Names shaped like a content hash are
+;;;;                reserved for PUT-VALUE.
 ;;;;
-;;;;   QUEUE-ENTRY : identity is always generated, never content-
-;;;;                 derived, because two independently enqueued jobs
-;;;;                 with identical payloads must stay two entries.
-;;;;                 FIFO via a sequence number; claiming is atomic;
-;;;;                 stale claims are reclaimable.
+;;;;   QUEUE-ENTRY  Keyed by a random token id, so identical payloads
+;;;;                remain separate entries. Claimed in object id order.
 ;;;;
-;;;; Both inherit bknr.ttl:timestamped-entry (see ttl.lisp in bknr.ttl) for
-;;;; CREATED-AT/EXPIRES-AT rather than declaring it twice.
+;;;; Values and payloads are stored as the form STORED-FORM returns and
+;;;; read back through VALUE-FROM-FORM (src/value.lisp).
 ;;;;
-;;;; chanl still serializes ad hoc :put/:get/:delete requests through
-;;;; SUBMIT, as before. That is a request-serialization queue local
-;;;; to one Lisp image, and is a different thing from the persisted
-;;;; QUEUE-ENTRY queue below, which is meant to be claimed by
-;;;; multiple worker processes. Do not conflate the two.
-
-(defpackage :bknr.hashkv
-  (:use :cl)
-  (:export ;; store lifecycle
-           #:open-store
-           #:close-store
-           ;; KV
-           #:put-value
-           #:put-keyed
-           #:get-value
-           #:delete-value
-           #:batch-put
-           ;; queue
-           #:enqueue
-           #:dequeue-claim
-           #:ack-claim
-           #:release-claim
-           #:reclaim-stale-claims
-           ;; maintenance
-           #:sweep-expired
-           ;; chanl request-serialization worker (KV only)
-           #:start-worker
-           #:stop-worker
-           #:submit))
+;;;; Every read that decides a write happens inside the same
+;;;; WITH-TRANSACTION as the write. The mp-store guard serialises
+;;;; transactions, so the check and the write cannot interleave with
+;;;; another thread.
+;;;;
+;;;; The chanl worker (START-WORKER, SUBMIT) serialises KV requests
+;;;; within one Lisp image. It does not read or write the persisted
+;;;; queue.
 
 (in-package :bknr.hashkv)
 
-;;; --- State ------------------------------------------------------------
+;;; --- Conditions ---------------------------------------------------------
 
-(defvar *store-directory* #P"/tmp/bknr.hashkv-store/"
-  "Filesystem location of the bknr.datastore snapshot and transaction log.")
-
-(defvar *worker-kernel* nil
-  "lparallel kernel used for parallel hashing during batch operations.")
-
-(defvar *worker-kernel-lock* (bt:make-lock)
-  "Guards *WORKER-KERNEL*'s lazy initialization. Without this,
-concurrent first calls to ENSURE-KERNEL could each see *WORKER-KERNEL*
-as NIL, each create their own kernel, and leak all but the one that
-wins the race: a real, found (not hypothetical) gap, matching the
-same dedicated-lparallel-kernel-under-lock pattern tdrhq/bknr-datastore
-uses for exactly this reason.")
-
-(defvar *request-channel* nil
-  "chanl channel that serializes KV mutations through a single worker thread.")
-
-(defvar *worker-thread* nil
-  "Handle for the task draining *REQUEST-CHANNEL*.")
-
-(defvar *worker-stopped-channel* nil
-  "Signaled by the worker just before it exits its loop, so STOP-WORKER
-can wait for real completion. CHANL:PEXEC submits to a shared thread
-pool rather than spawning a dedicated one-shot OS thread, so the pool
-thread underlying a task does not exit when that task's body finishes
-. It goes back to the pool to run other work. SB-THREAD:JOIN-THREAD on
-it never returns. This channel handshake uses the same synchronization
-primitive as the rest of this module instead.")
-
-(defvar *sequence-counter* 0
-  "In-memory monotonic counter for queue FIFO ordering. Reset to the
-current maximum on every OPEN-STORE so a restart cannot hand out a
-sequence number lower than what is already persisted.")
+(define-condition reserved-key-error (error)
+  ((key :initarg :key :reader reserved-key-error-key))
+  (:report (lambda (condition stream)
+             (format stream "~S has the form of a content hash; ~
+                             those keys are reserved for PUT-VALUE."
+                     (reserved-key-error-key condition))))
+  (:documentation "Signalled by PUT-KEYED when KEY is 64 lowercase hex
+digits, the form PUT-VALUE uses for content keys. Accepting such a key
+would let a named write replace a content-addressed value."))
 
 ;;; --- Persistent classes -------------------------------------------------
 
@@ -91,345 +43,378 @@ sequence number lower than what is already persisted.")
         :index-type bknr.indices:string-unique-index
         :index-reader entry-with-key)
    (value :initarg :value :accessor entry-value))
-  (:documentation "A single stored value, indexed by KEY, either a
-content hash (PUT-VALUE) or a caller-supplied name (PUT-KEYED). Uses
-STRING-UNIQUE-INDEX rather than plain UNIQUE-INDEX because
-UNIQUE-INDEX's hash-table defaults to an EQL test, which only
-matches identical string objects, not equal string content.
-STRING-UNIQUE-INDEX uses an EQUAL test instead. Without this, a
-key deserialized fresh from the transaction log after a restart is
-never EQL to the key string that indexed it originally, even though
-the two strings hold identical characters, so the index reader finds
-nothing for an entry that class-instances still reports correctly."))
+  (:documentation "A stored value and its key. The key index compares with
+EQUAL, so keys read back from the transaction log after a restart still
+match."))
 
 (bknr.datastore:defpersistent-class queue-entry (bknr.ttl:timestamped-entry)
   ((token-id :initarg :token-id :accessor entry-token-id
-           :index-type bknr.indices:string-unique-index
-           :index-reader entry-with-token-id)
-   (sequence-number :initarg :sequence-number :accessor entry-sequence-number)
+             :index-type bknr.indices:string-unique-index
+             :index-reader entry-with-token-id)
+   (sequence-number :initarg :sequence-number :initform nil)
    (payload :initarg :payload :accessor entry-payload)
    (claimed-by :initarg :claimed-by :accessor entry-claimed-by :initform nil)
    (claimed-at :initarg :claimed-at :accessor entry-claimed-at :initform nil))
-  (:documentation "A single queued entry. Identity (TOKEN-ID) is
-generated, never a content hash. Two entries with identical PAYLOADs
-are two distinct entries, which content-addressing would wrongly
-collapse. Named TOKEN-ID rather than ID specifically because ID
-collides with bknr.datastore:store-object's own internal identity
-slot, which the datastore expects to be an auto-incrementing
-integer. A string token-id in a slot literally named ID triggers a
-CASE-FAILURE deep in bknr.datastore's own internals expecting that
-integer. Uses STRING-UNIQUE-INDEX for the same reason KV-ENTRY does:
-plain UNIQUE-INDEX defaults to an EQL hash-table test, which fails
-to match a string key deserialized fresh after a restart against the
-string that indexed it originally, even with identical content."))
+  (:documentation "A queued payload. TOKEN-ID is random, never derived from
+the payload. The slot is not named ID because STORE-OBJECT already uses
+that name for its integer object id. Entries are ordered by that object
+id. SEQUENCE-NUMBER is no longer written; it stays in the class because
+bknr.datastore refuses to restore a snapshot that names a slot the class
+lacks, and 1.0.0 stores carry it."))
 
 (bknr.ttl:register-ttl-class 'kv-entry)
 (bknr.ttl:register-ttl-class 'queue-entry)
 
-(defun bootstrap-sequence-counter ()
-  "Sets *SEQUENCE-COUNTER* to the highest SEQUENCE-NUMBER already
-persisted, so freshly issued numbers stay monotonic across a restart.
-Relies on the same unverified CLASS-INSTANCES enumeration noted in
-ttl.lisp in bknr.ttl."
-  (setf *sequence-counter*
-        (reduce #'max
-                (mapcar #'entry-sequence-number
-                        (bknr.datastore:class-instances 'queue-entry))
-                :initial-value 0)))
+;;; --- Store lifecycle ----------------------------------------------------
 
-(defun open-store (&optional (directory *store-directory*))
-  "Opens, or creates, the on-disk datastore at DIRECTORY and returns
-it. Call this once before using any KV or queue operation.
+(defun default-store-directory ()
+  "Returns bknr.hashkv/ under the XDG data directory."
+  (uiop:xdg-data-home "bknr.hashkv/"))
 
-KNOWN GAP, tracked as denzuko/bknr.hashkv#1: after a close/reopen
-cycle, restored KV-ENTRY/QUEUE-ENTRY objects are found correctly by
-BKNR.DATASTORE:CLASS-INSTANCES, but their unique-index readers
-(ENTRY-WITH-KEY, ENTRY-WITH-JOB-ID) return NIL until something else
-touches the index in that session. Four attempted workarounds were
-tried and empirically ruled out, each requiring progressively deeper
-BKNR.INDICES internals knowledge without working: (1) re-SETF a slot
-to its own value, (2) force a real transition via SETF to NIL then
-back, (3) BKNR.INDICES:INDEX-ADD with 2 args (index object), ran
-without error but did not populate the index, (4) INDEX-ADD with 3
-args (index key object): arity error, that overload does not exist.
-Given none of these were simple, the sidestep failed the bar it was
-held to (force-multiplier, atomic-component, ease-for-humans) as
-badly as chasing the real fix would have, without being the real
-fix, so this is left as a known, honestly-failing case rather than
-a broken workaround masquerading as a fix. See the issue for the
-likely real answer (BKNR.INDICES:INDEX-REINITIALIZE, called correctly,
-which needs its exact contract confirmed against source outside the
-sandbox this was found in)."
-  (setf *store-directory* directory)
-  (ensure-directories-exist directory)
-  (prog1
-      (make-instance 'bknr.datastore:mp-store
-                      :directory directory
-                      :subsystems (list (make-instance 'bknr.datastore:store-object-subsystem)))
-    (bootstrap-sequence-counter)))
+(defun queue-entries ()
+  "Returns every QUEUE-ENTRY. The list belongs to bknr.indices; callers
+must not modify it."
+  (bknr.datastore:class-instances 'queue-entry))
+
+(defclass hashkv-store (bknr.datastore:mp-store)
+  ((worker :initform nil :accessor store-worker
+           :documentation "The WORKER started for this store, or NIL."))
+  (:documentation "The store OPEN-STORE returns. Holds the KV worker so
+START-WORKER, SUBMIT and STOP-WORKER need no argument and the library
+keeps no state of its own."))
+
+(defun open-store-p ()
+  "True when a store is open."
+  (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store* t))
+
+(defun open-store (&optional (directory (default-store-directory)))
+  "Opens, or creates, the store at DIRECTORY and returns it. Call once
+before any KV or queue operation."
+  (let ((directory (ensure-directories-exist (uiop:ensure-directory-pathname directory))))
+    (make-instance 'hashkv-store
+                   :directory directory
+                   :subsystems (list (make-instance 'bknr.datastore:store-object-subsystem)))))
 
 (defun close-store ()
-  "Closes the currently open datastore, if one is open. Safe to call
-even if OPEN-STORE was never called: BKNR.DATASTORE:*STORE* is
-unbound until the first OPEN-STORE, not merely NIL, so a bare
-reference to it would signal UNBOUND-VARIABLE instead of returning
-false."
-  (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
+  "Stops the open store's worker, if any, and closes the store. Does
+nothing when no store is open."
+  (when (open-store-p)
+    (stop-worker)
     (bknr.datastore:close-store)))
 
-;;; --- Hashing --------------------------------------------------------------
+;;; --- Keys and TTL ---------------------------------------------------------
+
+(defun form-hash (form)
+  "Returns the hex SHA-256 digest of FORM, a stored form, printed readably
+under standard I/O syntax, so the caller's printer settings and current
+package do not change the key. Signals PRINT-NOT-READABLE when FORM holds
+a persistent store object, which has no readable printed form."
+  (ironclad:byte-array-to-hex-string
+   (ironclad:digest-sequence
+    :sha256 (babel:string-to-octets (with-standard-io-syntax (prin1-to-string form))
+                                    :encoding :utf-8))))
 
 (defun hash-value (value)
-  "Returns the hex-encoded SHA-256 digest of VALUE's printed representation."
-  (let ((bytes (babel:string-to-octets (prin1-to-string value) :encoding :utf-8)))
-    (ironclad:byte-array-to-hex-string
-     (ironclad:digest-sequence :sha256 bytes))))
+  "Returns the content key PUT-VALUE would store VALUE under."
+  (form-hash (stored-form value)))
+
+(defun content-key-p (key)
+  "True when KEY is 64 lowercase hex digits, the form HASH-VALUE returns."
+  (and (= 64 (length key))
+       (every (lambda (c) (find c "0123456789abcdef")) key)))
 
 (defun expires-at-from (expires-in-seconds)
-  "Converts a relative EXPIRES-IN-SECONDS into an absolute universal
-time, or NIL if EXPIRES-IN-SECONDS is NIL (never expires)."
+  "Converts EXPIRES-IN-SECONDS to an absolute universal time. NIL stays NIL."
   (when expires-in-seconds
     (+ (get-universal-time) expires-in-seconds)))
+
+(defun store-entry (key value expires-in-seconds)
+  "Writes VALUE and a new expiry under KEY in one transaction, creating
+the entry or replacing both fields of the existing one. Returns KEY."
+  (let ((expires-at (expires-at-from expires-in-seconds)))
+    (bknr.datastore:with-transaction ()
+      (let ((entry (entry-with-key key)))
+        (cond (entry (setf (entry-value entry) value
+                           (bknr.ttl:entry-expires-at entry) expires-at))
+              (t (make-instance 'kv-entry :key key :value value :expires-at expires-at)))))
+    key))
+
+(defmacro with-found-entry ((var lookup) &body body)
+  "Evaluates LOOKUP and, when it finds an entry, evaluates it again inside a
+transaction, binds VAR to the result and runs BODY when VAR is still
+non-NIL. The first lookup keeps a miss from writing an empty transaction
+to the log; the second is the one the write depends on. Returns the value
+of BODY, or NIL."
+  `(when ,lookup
+     (bknr.datastore:with-transaction ()
+       (let ((,var ,lookup))
+         (when ,var ,@body)))))
 
 ;;; --- KV operations --------------------------------------------------------
 
 (defun put-value (value &key expires-in-seconds)
-  "Stores VALUE under its content hash and returns the hash as a
-string. An entry with the same hash is reused rather than duplicated.
-EXPIRES-IN-SECONDS, if given, sets a TTL relative to now. 0 or
-negative expires the entry immediately, not never: NIL means \"no
-TTL.\""
-  (let ((key (hash-value value)))
-    (when (entry-with-key key)
-      (return-from put-value key))
-    (bknr.datastore:with-transaction ()
-      (make-instance 'kv-entry :key key :value value
-                                :expires-at (expires-at-from expires-in-seconds)))
-    key))
+  "Stores a copy of VALUE under the hash of its stored form and returns the
+hash. Equal values, including instances of the same class with equal
+slots, share one key. Storing a value that is already present replaces
+its expiry with the one given here, so a re-put renews an expired or
+expiring entry. EXPIRES-IN-SECONDS NIL means no expiry; 0 or a negative
+number expires the entry at once. Signals UNSTORABLE-VALUE-ERROR as
+STORED-FORM does, and PRINT-NOT-READABLE when VALUE holds a persistent
+store object; store those with PUT-KEYED."
+  (let ((form (stored-form value)))
+    (store-entry (form-hash form) form expires-in-seconds)))
 
 (defun put-keyed (key value &key expires-in-seconds)
-  "Stores VALUE under the caller-supplied KEY, overwriting any
-existing entry at that key. Unlike PUT-VALUE, KEY is not derived from
-VALUE. Use this for named slots (session tokens, counters, config)
-rather than content-addressed blobs. Returns KEY.
+  "Stores a copy of VALUE under the string KEY, replacing any value and
+expiry already there, and returns KEY. Use for named slots such as
+sessions or counters, and for values that hold persistent store
+objects. EXPIRES-IN-SECONDS follows PUT-VALUE. Signals
+RESERVED-KEY-ERROR when KEY has the form of a content hash, and
+UNSTORABLE-VALUE-ERROR as STORED-FORM does."
+  (check-type key string)
+  (when (content-key-p key)
+    (error 'reserved-key-error :key key))
+  (store-entry key (stored-form value) expires-in-seconds))
 
-EXPIRES-IN-SECONDS 0 or negative expires the entry immediately, not
-never: NIL is what means \"no TTL.\" Easy to get backwards against
-APIs where 0 disables expiry instead."
-  (bknr.datastore:with-transaction ()
-    (let ((existing (entry-with-key key))
-          (expires-at (expires-at-from expires-in-seconds)))
-      (cond
-        (existing
-         (setf (entry-value existing) value
-               (bknr.ttl:entry-expires-at existing) expires-at))
-        (t (make-instance 'kv-entry :key key :value value :expires-at expires-at)))))
-  key)
+(defun expire-key (key)
+  "Deletes the entry under KEY if it is still expired when the transaction runs."
+  (with-found-entry (entry (entry-with-key key))
+    (when (bknr.ttl:entry-expired-p entry)
+      (bknr.datastore:delete-object entry))))
 
 (defun get-value (key)
-  "Returns the value stored under KEY, or NIL if no entry exists or
-the entry has expired. An expired entry found here is deleted on the
-spot (lazy expiry) rather than waiting for SWEEP-EXPIRED."
+  "Returns a fresh copy of the value under KEY, or NIL when there is none
+or it has expired. An expired entry is deleted when read. Changing the
+returned value does not change the store."
   (let ((entry (entry-with-key key)))
-    (unless entry
-      (return-from get-value nil))
-    (when (bknr.ttl:entry-expired-p entry)
-      (bknr.datastore:with-transaction ()
-        (bknr.datastore:delete-object entry))
-      (return-from get-value nil))
-    (entry-value entry)))
+    (cond ((null entry) nil)
+          ((bknr.ttl:entry-expired-p entry) (expire-key key) nil)
+          (t (value-from-form (entry-value entry))))))
 
 (defun delete-value (key)
-  "Removes the entry stored under KEY. Returns T if an entry was
-removed, or NIL if no entry existed under KEY."
-  (let ((entry (entry-with-key key)))
-    (unless entry
-      (return-from delete-value nil))
-    (bknr.datastore:with-transaction ()
-      (bknr.datastore:delete-object entry))
+  "Deletes the entry under KEY. Returns T when an entry was deleted, NIL
+when none existed."
+  (with-found-entry (entry (entry-with-key key))
+    (bknr.datastore:delete-object entry)
     t))
 
-(defun ensure-kernel ()
-  "Lazily initializes the lparallel kernel used for batch hashing.
-Locked, not a plain check-then-set: without the lock, two threads
-calling this concurrently for the first time could both see
-*WORKER-KERNEL* as NIL and both create a kernel, leaking one."
-  (bt:with-lock-held (*worker-kernel-lock*)
-    (or *worker-kernel*
-        (setf *worker-kernel* (lparallel:make-kernel 4)))))
+(defun call-with-kernel (function)
+  "Calls FUNCTION with an lparallel kernel. Uses the caller's
+LPARALLEL:*KERNEL* when one is bound; otherwise creates a four-worker
+kernel for this call and ends it before returning."
+  (cond (lparallel:*kernel* (funcall function))
+        (t (let ((lparallel:*kernel* (lparallel:make-kernel 4 :name "bknr.hashkv batch")))
+             (unwind-protect (funcall function)
+               (lparallel:end-kernel :wait t))))))
 
-(defun batch-put (values)
-  "Hashes VALUES in parallel across the lparallel kernel, then writes
-each one under its computed hash on the calling thread. Datastore
-transactions remain sequential regardless. Returns the list of
-resulting keys, in the same order as VALUES."
-  (ensure-kernel)
-  (let* ((lparallel:*kernel* *worker-kernel*)
-         (hashes (lparallel:pmap 'list #'hash-value values)))
-    (mapcar (lambda (value key)
-              (unless (entry-with-key key)
-                (bknr.datastore:with-transaction ()
-                  (make-instance 'kv-entry :key key :value value)))
-              key)
-            values hashes)))
+(defun form-and-hash (value)
+  "Returns (hash . stored-form) for VALUE, or the error the conversion
+signalled. Returning the error keeps it out of the lparallel worker,
+whose default is to enter the debugger in its own thread."
+  (handler-case (let ((form (stored-form value)))
+                  (cons (form-hash form) form))
+    (error (condition) condition)))
+
+(defun batch-put (values &key expires-in-seconds)
+  "Converts and hashes VALUES in parallel, then stores each one as
+PUT-VALUE would, in order, one transaction per value. Returns the keys in
+the order of VALUES. Every value is converted before any is stored, so
+an unstorable value stores nothing and its error is signalled in the
+caller's thread; an error while storing leaves earlier values stored.
+Bind LPARALLEL:*KERNEL* to reuse a kernel across calls."
+  (let* ((entries (call-with-kernel (lambda () (lparallel:pmap 'list #'form-and-hash values))))
+         (failure (find-if (lambda (entry) (typep entry 'condition)) entries)))
+    (when failure
+      (error failure))
+    (mapcar (lambda (entry) (store-entry (car entry) (cdr entry) expires-in-seconds))
+            entries)))
 
 ;;; --- Queue operations -------------------------------------------------------
 
 (defun generate-token-id ()
-  "Generates a probably-unique token id. Collision odds are low enough
-for a single-instance queue; a distributed deployment would want a
-stronger id scheme (e.g. a UUID library). Noted as a known limit,
-not solved here."
-  (format nil "token-~(~36R~)-~(~36R~)" (get-universal-time) (random most-positive-fixnum)))
+  "Returns 128 bits from ironclad's operating-system PRNG as 32 hex digits.
+CL:RANDOM is not used because every fresh SBCL image starts from the
+same *RANDOM-STATE*."
+  (ironclad:byte-array-to-hex-string (ironclad:random-data 16)))
 
 (defun enqueue (payload &key expires-in-seconds)
-  "Adds PAYLOAD to the queue and returns its token id. Unlike
-PUT-VALUE, identical payloads always get distinct entries.
-EXPIRES-IN-SECONDS, if given, lets an entry expire unclaimed rather
-than sitting forever."
-  (let ((token-id (generate-token-id)))
+  "Adds a copy of PAYLOAD to the queue and returns its token id. Identical
+payloads become separate entries. With EXPIRES-IN-SECONDS, an entry
+still unclaimed at that time is no longer claimable and is removed by
+SWEEP-EXPIRED. Signals UNSTORABLE-VALUE-ERROR as STORED-FORM does."
+  (let ((token-id (generate-token-id))
+        (form (stored-form payload))
+        (expires-at (expires-at-from expires-in-seconds)))
     (bknr.datastore:with-transaction ()
       (make-instance 'queue-entry
-                      :token-id token-id
-                      :sequence-number (incf *sequence-counter*)
-                      :payload payload
-                      :expires-at (expires-at-from expires-in-seconds)))
+                     :token-id token-id
+                     :payload form
+                     :expires-at expires-at))
     token-id))
 
+(defun claimable-p (entry now)
+  "True when ENTRY is unclaimed and unexpired at NOW."
+  (not (or (entry-claimed-by entry)
+           (bknr.ttl:entry-expired-p entry now))))
+
+(defun oldest-claimable (entries now)
+  "Returns the entry of ENTRIES that is claimable at NOW and has the lowest
+object id, or NIL. Object ids are allocated in transaction order, so the
+lowest id is the earliest enqueue. One pass; ENTRIES is not modified."
+  (reduce (lambda (best entry)
+            (cond ((not (claimable-p entry now)) best)
+                  ((null best) entry)
+                  ((< (bknr.datastore:store-object-id entry) (bknr.datastore:store-object-id best)) entry)
+                  (t best)))
+          entries
+          :initial-value nil))
+
 (defun dequeue-claim (claimant-id)
-  "Atomically claims the oldest unclaimed, unexpired entry for
-CLAIMANT-ID. Returns (VALUES TOKEN-ID PAYLOAD), or (VALUES NIL NIL) if
-nothing is claimable. The scan and the claim happen inside one
-transaction so two callers cannot claim the same entry.
-BKNR.DATASTORE:WITH-TRANSACTION only forwards the primary value of
-its body, silently dropping secondary values, so the result is
-captured into outer lexicals via SETF and returned only after
-leaving the transaction form, rather than returning (VALUES ...)
-directly from inside it."
-  (let (result-token-id result-payload)
-    (bknr.datastore:with-transaction ()
-      (let* ((now (get-universal-time))
-             (claimable (remove-if (lambda (e)
-                                      (or (entry-claimed-by e)
-                                          (bknr.ttl:entry-expired-p e now)))
-                                    (bknr.datastore:class-instances 'queue-entry)))
-             (candidate (first (sort claimable #'< :key #'entry-sequence-number))))
-        (when candidate
-          (setf (entry-claimed-by candidate) claimant-id
-                (entry-claimed-at candidate) now)
-          (setf result-token-id (entry-token-id candidate)
-                result-payload (entry-payload candidate)))))
-    (values result-token-id result-payload)))
+  "Claims the oldest claimable entry for CLAIMANT-ID. Returns
+(VALUES TOKEN-ID PAYLOAD), with PAYLOAD a fresh copy, or (VALUES NIL NIL)
+when nothing is claimable. The search and the claim run in one
+transaction."
+  (destructuring-bind (&optional token-id . form)
+      (bknr.datastore:with-transaction ()
+        (let* ((now (get-universal-time))
+               (entry (oldest-claimable (queue-entries) now)))
+          (when entry
+            (setf (entry-claimed-by entry) claimant-id
+                  (entry-claimed-at entry) now)
+            (cons (entry-token-id entry) (entry-payload entry)))))
+    (values token-id (value-from-form form))))
+
+(defun clear-claim (entry)
+  "Removes any claim on ENTRY. Call inside a transaction."
+  (setf (entry-claimed-by entry) nil
+        (entry-claimed-at entry) nil))
 
 (defun ack-claim (token-id)
-  "Marks entry TOKEN-ID complete by removing it from the queue.
-Returns T if a matching entry was found and removed, NIL otherwise."
-  (let ((entry (entry-with-token-id token-id)))
-    (unless entry
-      (return-from ack-claim nil))
-    (bknr.datastore:with-transaction ()
-      (bknr.datastore:delete-object entry))
+  "Deletes entry TOKEN-ID from the queue. Returns T when it existed, NIL
+otherwise."
+  (with-found-entry (entry (entry-with-token-id token-id))
+    (bknr.datastore:delete-object entry)
     t))
 
 (defun release-claim (token-id)
-  "Clears the claim on entry TOKEN-ID without removing it, making it
-eligible for DEQUEUE-CLAIM again. The retry path for a claimant that
-failed to finish it. Returns T if a matching entry was found, NIL
-otherwise."
-  (let ((entry (entry-with-token-id token-id)))
-    (unless entry
-      (return-from release-claim nil))
-    (bknr.datastore:with-transaction ()
-      (setf (entry-claimed-by entry) nil
-            (entry-claimed-at entry) nil))
+  "Clears the claim on entry TOKEN-ID so DEQUEUE-CLAIM can return it
+again. Returns T when the entry exists, NIL otherwise."
+  (with-found-entry (entry (entry-with-token-id token-id))
+    (clear-claim entry)
     t))
 
+(defun stale-claim-p (entry now older-than-seconds)
+  "True when ENTRY was claimed at least OLDER-THAN-SECONDS before NOW."
+  (let ((claimed-at (entry-claimed-at entry)))
+    (and claimed-at (>= (- now claimed-at) older-than-seconds))))
+
 (defun reclaim-stale-claims (&key (older-than-seconds 300))
-  "Releases any claim older than OLDER-THAN-SECONDS, so a worker that
-crashed mid-claim does not leave its claim stuck forever. Returns the
-count of claims reclaimed."
-  (let ((now (get-universal-time))
-        (reclaimed 0))
-    (dolist (entry (bknr.datastore:class-instances 'queue-entry))
-      (when (and (entry-claimed-at entry)
-                 (>= (- now (entry-claimed-at entry)) older-than-seconds))
-        (bknr.datastore:with-transaction ()
-          (setf (entry-claimed-by entry) nil
-                (entry-claimed-at entry) nil))
-        (incf reclaimed)))
-    reclaimed))
+  "Clears every claim at least OLDER-THAN-SECONDS old, in one transaction,
+so entries held by a claimant that stopped are claimable again. Returns
+the number of claims cleared."
+  (bknr.datastore:with-transaction ()
+    (let ((now (get-universal-time)))
+      (count-if (lambda (entry)
+                  (when (stale-claim-p entry now older-than-seconds)
+                    (clear-claim entry)
+                    t))
+                (queue-entries)))))
 
 ;;; --- Maintenance ------------------------------------------------------------
 
 (defun sweep-expired ()
-  "Deletes every expired KV-ENTRY and QUEUE-ENTRY. Thin wrapper over
-bknr.ttl:sweep-expired so callers do not need to depend on :bknr.ttl
-directly just to run maintenance."
+  "Deletes every expired KV-ENTRY and QUEUE-ENTRY and returns the count.
+Calls BKNR.TTL:SWEEP-EXPIRED."
   (bknr.ttl:sweep-expired))
 
-;;; --- Concurrent request queue via chanl (KV only) ---------------------------
+;;; --- chanl request worker (KV only) ----------------------------------------
 
 (defstruct request
-  "A single queued KV operation. OP is one of :PUT, :GET, or :DELETE.
-ARG is the value (for :PUT) or key (for :GET / :DELETE). REPLY is the
-chanl channel the caller reads its result from."
+  "One KV request. OP is :PUT, :GET or :DELETE. ARG is the value for :PUT
+and the key otherwise. REPLY is the channel that receives the outcome."
   op arg reply)
 
-(defun dispatch-request (req)
-  "Applies REQ to the KV store according to its OP, and returns the result."
-  (case (request-op req)
-    (:put (put-value (request-arg req)))
-    (:get (get-value (request-arg req)))
-    (:delete (delete-value (request-arg req)))
-    (t (error "Unknown bknr.hashkv request op: ~S" (request-op req)))))
+(defun apply-op (op arg)
+  "Runs the KV operation named by OP on ARG."
+  (ecase op
+    (:put (put-value arg))
+    (:get (get-value arg))
+    (:delete (delete-value arg))))
+
+(defun dispatch-request (request)
+  "Runs REQUEST and returns (:OK . result), or (:ERROR . condition) when
+the operation signals. The worker never unwinds on a caller's error."
+  (handler-case (cons :ok (apply-op (request-op request) (request-arg request)))
+    (error (condition) (cons :error condition))))
+
+(defstruct (worker (:constructor %make-worker))
+  "A running or stopped KV worker. REQUESTS carries requests to the task,
+STOPPED receives the task's exit notice, STATE is :RUNNING or :STOPPED,
+and LOCK serialises changes to STATE. CHANL:PEXEC tasks run on pooled
+threads that do not exit, so stopping waits on STOPPED rather than
+joining a thread."
+  (requests (make-instance 'chanl:channel))
+  (stopped (make-instance 'chanl:channel))
+  (state :running)
+  (lock (bt:make-lock "bknr.hashkv worker")))
+
+(defun worker-loop (worker)
+  "Answers requests from WORKER's channel until it receives NIL."
+  (loop for request = (chanl:recv (worker-requests worker))
+        while request
+        do (chanl:send (request-reply request) (dispatch-request request)))
+  (chanl:send (worker-stopped worker) t))
+
+(defun current-store ()
+  "Returns the open store when OPEN-STORE created it, otherwise NIL."
+  (and (open-store-p)
+       (typep bknr.datastore:*store* 'hashkv-store)
+       bknr.datastore:*store*))
+
+(defun current-worker ()
+  "Returns the worker attached to the open store, or NIL."
+  (let ((store (current-store)))
+    (and store (store-worker store))))
+
+(defun worker-running-p (&optional (worker (current-worker)))
+  "True when WORKER, by default the open store's worker, exists and has
+not been stopped."
+  (and worker (eq :running (worker-state worker))))
 
 (defun start-worker ()
-  "Starts the single worker task that drains *REQUEST-CHANNEL* and
-applies each queued KV request against the store in arrival order.
-A NIL request on the channel tells the worker to stop.
+  "Starts a KV worker for the open store and returns it. When the store's
+worker is already running, returns that worker instead of starting a
+second one. Signals an error when no store is open."
+  (let ((store (current-store)))
+    (unless store
+      (error "bknr.hashkv has no open store; call OPEN-STORE first."))
+    (unless (worker-running-p (store-worker store))
+      (let ((worker (%make-worker)))
+        (chanl:pexec (:name "bknr.hashkv-worker") (worker-loop worker))
+        (setf (store-worker store) worker)))
+    (store-worker store)))
 
-Idempotent: if a worker task already exists and has not reached
-CHANL's :TERMINATED status, this returns the existing task rather
-than starting a second one. Without this guard, a second
-START-WORKER call (with no intervening STOP-WORKER) permanently
-orphans the first worker task: both tasks would end up recv'ing
-from the same *REQUEST-CHANNEL*, and STOP-WORKER only signals and
-waits for whichever task *WORKER-THREAD* currently points at, since
-that reference gets overwritten by the second call. The first task
-keeps running forever
-with no way to reach it through this API again."
-  (when (and *worker-thread*
-             (not (eq (chanl:task-status *worker-thread*) :terminated)))
-    (return-from start-worker *worker-thread*))
-  (unless *request-channel*
-    (setf *request-channel* (make-instance 'chanl:channel)))
-  (setf *worker-stopped-channel* (make-instance 'chanl:channel))
-  (setf *worker-thread*
-        (chanl:pexec (:name "bknr.hashkv-worker")
-          (loop
-            (let ((req (chanl:recv *request-channel*)))
-              (unless req
-                (chanl:send *worker-stopped-channel* t)
-                (return))
-              (chanl:send (request-reply req) (dispatch-request req)))))))
+(defun stop-worker (&optional (worker (current-worker)))
+  "Stops WORKER, by default the open store's worker, and waits until its
+task has left the loop. Safe to call from any thread; does nothing when
+there is no worker or it is already stopped."
+  (when worker
+    (bt:with-lock-held ((worker-lock worker))
+      (when (worker-running-p worker)
+        (setf (worker-state worker) :stopped)
+        (chanl:send (worker-requests worker) nil)
+        (chanl:recv (worker-stopped worker))))))
 
-(defun stop-worker ()
-  "Signals the worker to exit and waits for it to finish,
-via the channel handshake set up in START-WORKER rather than joining
-an OS thread (see *WORKER-STOPPED-CHANNEL*'s docstring for why)."
-  (when *request-channel*
-    (chanl:send *request-channel* nil))
-  (when *worker-stopped-channel*
-    (chanl:recv *worker-stopped-channel*))
-  (setf *worker-thread* nil))
-
-(defun submit (op arg)
-  "Queues OP (:PUT, :GET, or :DELETE) with ARG on the worker thread and
-blocks until the result is available. START-WORKER must be called
-first. This is the KV request queue, not the QUEUE-ENTRY queue;
-see the file header."
-  (unless *request-channel*
+(defun submit (op arg &optional (worker (current-worker)))
+  "Sends OP (:PUT, :GET or :DELETE) with ARG to WORKER, by default the open
+store's worker, waits, and returns the result. A condition signalled by
+the operation is signalled again in the caller's thread. Signals an
+error when the worker is missing or stopped."
+  (unless (worker-running-p worker)
     (error "bknr.hashkv worker is not running; call START-WORKER first."))
   (let ((reply (make-instance 'chanl:channel)))
-    (chanl:send *request-channel* (make-request :op op :arg arg :reply reply))
-    (chanl:recv reply)))
+    (chanl:send (worker-requests worker) (make-request :op op :arg arg :reply reply))
+    (destructuring-bind (status . result) (chanl:recv reply)
+      (when (eq status :error)
+        (error result))
+      result)))

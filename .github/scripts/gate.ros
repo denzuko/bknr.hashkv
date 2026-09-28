@@ -1,0 +1,135 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -- $0 "$@"
+|#
+;;;; Pre-commit gate for every Lisp source file in the repository:
+;;;;   G1  every file reads to the end with the Lisp reader (balance,
+;;;;       strings, #| |# and character escapes handled by the reader)
+;;;;   G2  no bare (IF ...) forms and no (IS (NOT ...)) assertions
+;;;;   G3  docstrings contain none of the listed voice violations
+;;;; Prints each violation and exits 0 when there are none, 1 otherwise.
+
+(progn (ros:ensure-asdf) (require :sb-cover))
+
+(let ((root (uiop:pathname-parent-directory-pathname
+             (uiop:pathname-parent-directory-pathname (uiop:pathname-directory-pathname *load-pathname*)))))
+  (let ((qlot-setup (probe-file (merge-pathnames ".qlot/setup.lisp" root))))
+    (when qlot-setup (load qlot-setup)))
+  (push root asdf:*central-registry*))
+
+(ql:quickload :cl-ppcre :silent t)
+(ql:quickload (remove-if-not (lambda (system) (asdf:find-system system nil))
+                             '(:bknr.hashkv/tests :bknr.hashkv/e2e :bknr.hashkv/bdd
+                               :bknr.hashkv/docs :bknr.hashkv/ci))
+              :silent t)
+
+(defpackage :bknr.hashkv/gate
+  (:use :cl))
+
+(in-package :bknr.hashkv/gate)
+
+(defun source-files (root)
+  "Returns every Lisp source file under ROOT that the gate reads."
+  (mapcan (lambda (glob) (directory (merge-pathnames glob root)))
+          '("*.asd" "*.ros" "src/*.lisp" "t/*.lisp"
+            "features/step_definitions/*.lisp" ".github/scripts/*.ros")))
+
+(defun voice-scanners ()
+  "Returns case-insensitive scanners for phrases a docstring must not contain."
+  (mapcar (lambda (pattern) (cl-ppcre:create-scanner pattern :case-insensitive-mode t))
+          '("\\b\\w+'(t|re|ve|ll|d|m)\\b" "\\b(it|that|there|here|what|let)'s\\b"
+            "worth (noting|doing|avoiding|knowing)" "not hypothetical" "\\bhonestly\\b"
+            "\\b(un)?verified\\b" "\\bconfirmed\\b" "let that land" "this (section|file) documents"
+            "matters here" "easy to get" "red phase" "rather than assumed" "keep in mind"
+            "\\bnot [^.;]{1,40}[,;] it is\\b" "\\bnot [^.;]{1,40} [-—] it is\\b")))
+
+(defun open-source (file)
+  "Opens FILE for reading, positioned after the shell header line of a .ros script."
+  (let ((stream (open file)))
+    (when (string= "ros" (pathname-type file))
+      (read-line stream))
+    stream))
+
+(defun read-forms (file &key suppress)
+  "Returns every top-level form of FILE. Evaluates DEFPACKAGE and IN-PACKAGE
+forms as they are read so later symbols resolve. #. is evaluated, since the
+gate only reads this repository's own sources."
+  (let ((*package* (find-package :cl-user))
+        (*read-suppress* suppress))
+    (with-open-stream (stream (open-source file))
+      (loop for form = (read stream nil stream)
+            until (eq form stream)
+            when (and (consp form) (member (first form) '(defpackage in-package)))
+              do (eval form)
+            collect form))))
+
+(defun symbol-name* (object)
+  "SYMBOL-NAME of OBJECT, or the empty string for non-symbols."
+  (or (and (symbolp object) (symbol-name object)) ""))
+
+(defun subforms (form)
+  "Returns FORM and every cons nested inside it, when FORM is a cons."
+  (when (consp form)
+    (cons form (loop for tail on form
+                     while (consp tail)
+                     append (subforms (car tail))))))
+
+(defun negated-assertion-p (form)
+  "True for (IS (NOT ...)) in any package."
+  (and (string= "IS" (symbol-name* (first form)))
+       (consp (second form))
+       (eq 'not (first (second form)))))
+
+(defun g2-violations (forms)
+  "G2: messages for bare IF forms and negated IS assertions in FORMS."
+  (loop for form in (mapcan #'subforms forms)
+        when (eq 'if (first form))
+          collect (format nil "G2 bare IF: ~S" form)
+        when (negated-assertion-p form)
+          collect (format nil "G2 use IS-FALSE instead of ~S" form)))
+
+(defun docstring-of (form)
+  "Returns the docstring FORM carries in its documentation position, or NIL."
+  (let ((head (symbol-name* (first form))))
+    (find-if #'stringp
+             (list (and (member head '("DEFUN" "DEFMACRO" "DEFGENERIC" "DEFVAR" "DEFPARAMETER" "DEFCONSTANT")
+                                :test #'string=)
+                        (nth 3 form))
+                   (and (member head '("DEFSTRUCT" "TEST" "DEF-SUITE") :test #'string=)
+                        (nth 2 form))
+                   (and (eq :documentation (first form)) (second form))))))
+
+(defun g3-violations (forms)
+  "G3: messages for docstrings in FORMS that match a voice scanner."
+  (loop with scanners = (voice-scanners)
+        for doc in (remove nil (mapcar #'docstring-of (mapcan #'subforms forms)))
+        append (loop for scanner in scanners
+                     for hit = (cl-ppcre:scan-to-strings scanner doc)
+                     when hit
+                       collect (format nil "G3 voice ~S in docstring ~S" hit (subseq doc 0 (min 60 (length doc)))))))
+
+(defun forms-violations (file)
+  "Runs G2 and G3 on the forms of FILE and returns the messages."
+  (handler-case (let ((forms (read-forms file)))
+                  (append (g2-violations forms) (g3-violations forms)))
+    (error (condition) (list (format nil "G2 cannot resolve symbols: ~A" condition)))))
+
+(defun file-violations (file)
+  "Runs G1, then G2 and G3 when FILE reads cleanly, and returns the messages."
+  (handler-case (progn (read-forms file :suppress t)
+                       (forms-violations file))
+    (error (condition) (list (format nil "G1 read error: ~A" condition)))))
+
+(defun main (&rest argv)
+  "Checks every source file, prints each violation, and exits 1 when any
+were found. ARGV is unused."
+  (declare (ignore argv))
+  (let* ((root (uiop:getcwd))
+         (count (loop for file in (source-files root)
+                      for messages = (file-violations file)
+                      do (dolist (message messages)
+                           (format t "~&~A: ~A~%" (enough-namestring file root) message))
+                      sum (length messages))))
+    (format t "~&gate: ~D violation~:P~%" count)
+    (uiop:quit (min 1 count))))

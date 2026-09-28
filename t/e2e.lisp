@@ -1,10 +1,7 @@
 ;;;; t/e2e.lisp
 ;;;;
-;;;; End-to-end guards. Unlike t/test.lisp, these exercise the system
-;;;; the way a real caller would: through the worker/submit interface,
-;;;; and across a close-store/open-store cycle, to catch the class of
-;;;; bug unit tests miss: state that only breaks once the process
-;;;; boundary or the datastore's on-disk representation is involved.
+;;;; End-to-end suite: drives the API through the worker and across a
+;;;; close and reopen of the same store directory.
 
 (defpackage :bknr.hashkv/e2e
   (:use :cl :fiveam)
@@ -12,94 +9,108 @@
 
 (in-package :bknr.hashkv/e2e)
 
-(def-suite bknr.hashkv-e2e-suite :description "hashkv end-to-end guards")
+(def-suite bknr.hashkv-e2e-suite :description "bknr.hashkv end-to-end tests")
 (in-suite bknr.hashkv-e2e-suite)
 
-(defvar *e2e-directory* #P"/tmp/bknr.hashkv-e2e-store/")
+(defun scratch-directory ()
+  "Returns an unused directory under the system temporary directory."
+  (uiop:ensure-directory-pathname
+   (merge-pathnames (format nil "bknr.hashkv-e2e-~A" (bknr.hashkv::generate-token-id))
+                    (uiop:temporary-directory))))
 
-(defun fresh-e2e-store ()
-  "Deletes and reopens a scratch datastore for e2e isolation. Closes
-any store left open by a prior test that errored before its own
-CLOSE-STORE, matching t/test.lisp's FRESH-STORE."
-  (when (and (boundp 'bknr.datastore:*store*) bknr.datastore:*store*)
-    (bknr.hashkv:close-store))
-  (when (probe-file *e2e-directory*)
-    (uiop:delete-directory-tree *e2e-directory* :validate t))
-  (bknr.hashkv:open-store *e2e-directory*))
+(defmacro with-e2e-store ((directory) &body body)
+  "Opens an empty store in a new directory bound to DIRECTORY, runs BODY,
+and closes whichever store is open afterwards, even when BODY signals."
+  `(let ((,directory (scratch-directory)))
+     (declare (ignorable ,directory))
+     (bknr.hashkv:close-store)
+     (bknr.hashkv:open-store ,directory)
+     (unwind-protect (progn ,@body)
+       (bknr.hashkv:close-store))))
+
+(defun reopen (directory)
+  "Closes the store and opens it again from DIRECTORY."
+  (bknr.hashkv:close-store)
+  (bknr.hashkv:open-store directory))
 
 (test full-lifecycle-through-worker
-  "Opens the store, starts the worker, round-trips a value entirely
-through SUBMIT (never calling PUT-VALUE/GET-VALUE directly), then
-tears the worker and store back down."
-  (fresh-e2e-store)
-  (bknr.hashkv:start-worker)
-  (unwind-protect
-       (let* ((key (bknr.hashkv:submit :put "e2e value"))
-              (fetched (bknr.hashkv:submit :get key)))
-         (is (string= "e2e value" fetched))
-         (is (eq t (bknr.hashkv:submit :delete key)))
-         (is (null (bknr.hashkv:submit :get key))))
-    (bknr.hashkv:stop-worker)
-    (bknr.hashkv:close-store)))
+  (with-e2e-store (directory)
+    (bknr.hashkv:start-worker)
+    (let ((key (bknr.hashkv:submit :put "e2e value")))
+      (is (string= "e2e value" (bknr.hashkv:submit :get key)))
+      (is (eq t (bknr.hashkv:submit :delete key)))
+      (is-false (bknr.hashkv:submit :get key)))
+    (bknr.hashkv:stop-worker)))
 
 (test entries-survive-a-store-restart
-  "Writes a value, closes the store (simulating a process restart),
-reopens it at the same directory, and confirms the value is still
-retrievable. The guard catches a transaction log that is not
-being flushed or replayed correctly."
-  (fresh-e2e-store)
-  (let ((key (bknr.hashkv:put-value "durable value")))
-    (bknr.hashkv:close-store)
-    (bknr.hashkv:open-store *e2e-directory*)
-    (is (string= "durable value" (bknr.hashkv:get-value key)))
-    (bknr.hashkv:close-store)))
+  (with-e2e-store (directory)
+    (let ((key (bknr.hashkv:put-value "durable value")))
+      (reopen directory)
+      (is (string= "durable value" (bknr.hashkv:get-value key))))))
+
+(test renewed-ttl-survives-a-store-restart
+  (with-e2e-store (directory)
+    (let ((key (bknr.hashkv:put-value "renewed" :expires-in-seconds -1)))
+      (bknr.hashkv:put-value "renewed")
+      (reopen directory)
+      (is (string= "renewed" (bknr.hashkv:get-value key))))))
 
 (test batch-put-then-individually-readable
-  "Batch-writes several values in parallel, then confirms each is
-independently readable through the ordinary single-value path,
-catching any hazard from the lparallel hashing step racing the
-sequential datastore writes."
-  (fresh-e2e-store)
-  (let* ((values '("alpha" "beta" "gamma" "delta"))
-         (keys (bknr.hashkv:batch-put values)))
-    (loop for value in values
-          for key in keys
-          do (is (string= value (bknr.hashkv:get-value key)))))
-  (bknr.hashkv:close-store))
+  (with-e2e-store (directory)
+    (let ((values '("alpha" "beta" "gamma" "delta")))
+      (is (equal values (mapcar #'bknr.hashkv:get-value (bknr.hashkv:batch-put values)))))))
 
 (test queued-entries-survive-a-store-restart
-  "Enqueues an entry, closes the store, reopens it, and confirms the
-entry is still there and still claimable in the right order. The
-queue analogue of ENTRIES-SURVIVE-A-STORE-RESTART, and also a check
-that the sequence counter bootstraps correctly rather than resetting
-to zero and colliding with what is already persisted."
-  (fresh-e2e-store)
-  (bknr.hashkv:enqueue "before restart")
-  (bknr.hashkv:close-store)
-  (bknr.hashkv:open-store *e2e-directory*)
-  (bknr.hashkv:enqueue "after restart")
-  (multiple-value-bind (id payload) (bknr.hashkv:dequeue-claim "claimant-1")
-    (declare (ignore id))
-    (is (string= "before restart" payload)))
-  (bknr.hashkv:close-store))
+  (with-e2e-store (directory)
+    (bknr.hashkv:enqueue "before restart")
+    (reopen directory)
+    (bknr.hashkv:enqueue "after restart")
+    (is (equal "before restart" (nth-value 1 (bknr.hashkv:dequeue-claim "claimant-1"))))))
 
-(test stale-claim-is-reclaimed
-  "Claims an entry, then simulates a claimant that crashed mid-claim
-by back-dating the claim's CLAIMED-AT, and confirms
-RECLAIM-STALE-CLAIMS frees it for another claimant rather than
-leaving it stuck forever."
-  (fresh-e2e-store)
-  (let ((id (bknr.hashkv:enqueue "abandoned entry")))
+(test claims-survive-a-store-restart
+  (with-e2e-store (directory)
+    (bknr.hashkv:enqueue "held")
     (bknr.hashkv:dequeue-claim "claimant-1")
-    (let ((entry (bknr.hashkv::entry-with-token-id id)))
-      (bknr.datastore:with-transaction ()
-        (setf (bknr.hashkv::entry-claimed-at entry) (- (get-universal-time) 9999))))
-    (is (= 1 (bknr.hashkv:reclaim-stale-claims :older-than-seconds 300)))
-    (multiple-value-bind (reclaimed-id payload) (bknr.hashkv:dequeue-claim "claimant-2")
-      (is (string= id reclaimed-id))
-      (is (string= "abandoned entry" payload))))
-  (bknr.hashkv:close-store))
+    (reopen directory)
+    (is-false (bknr.hashkv:dequeue-claim "claimant-2"))))
+
+(defun run-threads (count function)
+  "Runs FUNCTION with each index below COUNT on its own thread, releases the
+threads together, and waits for all of them."
+  (let* ((gate (bt:make-semaphore))
+         (threads (loop for n below count
+                        collect (let ((n n))
+                                  (bt:make-thread (lambda () (bt:wait-on-semaphore gate) (funcall function n)))))))
+    (bt:signal-semaphore gate :count count)
+    (mapc #'bt:join-thread threads)))
+
+(defun contended-value (thread round)
+  "Returns the value THREAD writes in ROUND: even threads share one value
+per round, odd threads write their own."
+  (cond ((evenp thread) (format nil "shared-~D" round))
+        (t (format nil "~D-~D" thread round))))
+
+(defun indexed-under-own-key-p (entry)
+  "True when the key index maps ENTRY's key back to ENTRY itself."
+  (eq entry (bknr.hashkv::entry-with-key (bknr.hashkv::entry-key entry))))
+
+(defun contended-put-errors ()
+  "Runs 16 threads of 50 puts each and returns how many puts signalled."
+  (let ((errors 0)
+        (lock (bt:make-lock)))
+    (run-threads 16 (lambda (thread)
+                      (dotimes (round 50)
+                        (handler-case (bknr.hashkv:put-value (contended-value thread round))
+                          (error () (bt:with-lock-held (lock) (incf errors)))))))
+    errors))
+
+(test concurrent-mixed-puts-keep-object-table-and-key-index-consistent
+  (with-e2e-store (directory)
+    (is (= 0 (contended-put-errors)))
+    (let ((objects (bknr.datastore:class-instances 'bknr.hashkv::kv-entry)))
+      (is (= (+ 50 (* 8 50)) (length objects)))
+      (is (every #'indexed-under-own-key-p objects)))))
 
 (defun run-e2e ()
-  "Runs the bknr.hashkv e2e suite and returns T if every guard passed."
+  "Runs the end-to-end suite and returns T when every test passed."
   (fiveam:run! 'bknr.hashkv-e2e-suite))
